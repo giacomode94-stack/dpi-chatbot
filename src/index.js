@@ -68,17 +68,19 @@ function generaRisposta(testo, from) {
     testo === "start"
   ) {
     return (
-      `👋 Benvenuto in *De Pasquale Impianti*!\n\n` +
       `Siamo specializzati in:\n` +
-      `⚡ Impianti Elettrici\n` +
-      `❄️ Climatizzazione & Pompe di Calore\n` +
-      `☀️ Impianti Fotovoltaici\n` +
-      `🏠 Efficienza Energetica\n\n` +
-      `Scegli un'opzione:\n` +
-      `1️⃣ *preventivo* - Richiedi un preventivo\n` +
-      `2️⃣ *servizi* - I nostri servizi\n` +
-      `3️⃣ *conto termico* - Info incentivi\n` +
-      `4️⃣ *contatti* - Parlare con noi\n\n` +
+            `⚡ Impianti Elettrici, Idrici, Riscaldamento\n` +
+            `❄️ Climatizzazione & Pompe di Calore\n` +
+            `☀️ Impianti Fotovoltaici\n` +
+            `🏠 Efficienza Energetica\n` +
+            `📹 TVCC - Automazioni\n` +
+            `🔥 Caldaie\n\n` +
+            `Scegli un'opzione:\n` +
+            `1️⃣ *preventivo* - Richiedi un preventivo\n` +
+            `2️⃣ *servizi* - I nostri servizi\n` +
+            `3️⃣ *conto termico* - Info incentivi\n` +
+            `4️⃣ *contatti* - Parlare con noi\n` +
+            `5️⃣ *urgente* - Richiesta intervento urgente\n\n` +
       `Rispondi con il numero o la parola chiave 👆`
     );
   }
@@ -89,8 +91,8 @@ function generaRisposta(testo, from) {
       `📋 *Richiesta Preventivo*\n\n` +
       `Per preparare un preventivo personalizzato abbiamo bisogno di alcune informazioni.\n\n` +
       `Inviaci:\n` +
-      `• Tipo di intervento (es. pompa di calore, fotovoltaico, impianto elettrico...)\n` +
-      `• Comune dove si trova l'immobile\n` +
+            `• Nome e cognome\n` +
+            `• Tipo di intervento (es. pompa di calore, fotovoltaico, impianto elettrico...)\n` +
       `• Tipo di immobile (appartamento, villa, capannone...)\n\n` +
       `Puoi scriverci qui su WhatsApp oppure chiamarci al:\n` +
             `📞 *+39 0923 361191*\n\n` +
@@ -102,13 +104,18 @@ function generaRisposta(testo, from) {
   if (testo.includes("servizi") || testo === "2") {
     return (
       `🔧 *I Nostri Servizi*\n\n` +
-      `⚡ *Impianti Elettrici*\n` +
-      `Civili, industriali, fotovoltaici, CCTV, allarmi, cancelli\n\n` +
-      `❄️ *Climatizzazione*\n` +
-      `Pompe di calore, split, VMC, riscaldamento a pavimento\n\n` +
-      `☀️ *Fotovoltaico*\n` +
-      `Residenziale e industriale, con accumulo e colonnine EV\n\n` +
-      `🏠 *Efficienza Energetica*\n` +
+            `⚡ *Impianti Elettrici, Idrici, Riscaldamento*\n` +
+            `Civili, industriali, CCTV, allarmi, cancelli\n\n` +
+            `❄️ *Climatizzazione & Pompe di Calore*\n` +
+            `Pompe di calore, split, VMC, riscaldamento a pavimento\n\n` +
+            `☀️ *Impianti Fotovoltaici*\n` +
+            `Residenziale e industriale, con accumulo e colonnine EV\n\n` +
+            `🏠 *Efficienza Energetica*\n` +
+            `Diagnosi energetica, Conto Termico 3.0, Superbonus\n\n` +
+            `📹 *TVCC - Automazioni*\n` +
+            `Videosorveglianza, automazioni cancelli e accessi\n\n` +
+            `🔥 *Caldaie*\n` +
+            `Installazione, manutenzione e assistenza\n\n` +
       `Diagnosi energetica, Conto Termico 3.0, Superbonus\n\n` +
       `Per info scrivi *preventivo* oppure *contatti* 👇`
     );
@@ -138,15 +145,29 @@ function generaRisposta(testo, from) {
     return (
       `📍 *De Pasquale Impianti Srl*\n\n` +
       `📞 Telefono: *+39 0923 361191*\n` +
-      `📧 Email: *info@depasqualeimpianti.it*\n` +
-      `🌐 Web: *www.depasqualeimpianti.it*\n\n` +
-      `📍 Marsala (TP), Sicilia\n\n` +
-      `🕐 Orari:\n` +
-      `Lun-Ven: 8:00 - 18:00\n` +
-      `Sab: 8:00 - 12:00\n\n` +
+      `📧 Email: info@depasqualeimpianti.com\n` +
+            `🌐 Web: www.depasqualeimpianti.com\n\n` +
+            `📍 Marsala (TP), Sicilia\n\n` +
+            `🕐 Orari ufficio:\n` +
+            `Lun-Ven: 9:00 - 18:30\n` +
+            `Sab-Dom: chiusi\n\n` +
       `Per un preventivo rapido scrivi *preventivo* 👆`
     );
   }
+
+    // Intervento urgente
+    if (
+          testo.includes("urgente") ||
+          testo.includes("emergenza") ||
+          testo === "5"
+        ) {
+          return (
+                  `🚨 *Richiesta Intervento Urgente*\n\n` +
+                  `Per le emergenze ti invitiamo a visitare il nostro sito web:\n` +
+                  `🌐 www.depasqualeimpianti.com\n\n` +
+                  `Scrivici tramite la nostra *live chat* presente sul sito: un operatore ti risponderà il prima possibile! ⚡`
+                );
+    }
 
   // Fotovoltaico
   if (
