@@ -92,8 +92,8 @@ function generaRisposta(testo, from) {
       `• Tipo di intervento (es. pompa di calore, fotovoltaico, impianto elettrico...)\n` +
       `• Comune dove si trova l'immobile\n` +
       `• Tipo di immobile (appartamento, villa, capannone...)\n\n` +
-      `Puoi scrivere qui oppure chiamarci al:\n` +
-      `📞 *+39 0923 000000*\n\n` +
+      `Puoi scriverci qui su WhatsApp oppure chiamarci al:\n` +
+            `📞 *+39 0923 361191*\n\n` +
       `Un nostro tecnico ti ricontatterà entro 24 ore! ✅`
     );
   }
@@ -137,7 +137,7 @@ function generaRisposta(testo, from) {
   if (testo.includes("contatti") || testo.includes("telefono") || testo === "4") {
     return (
       `📍 *De Pasquale Impianti Srl*\n\n` +
-      `📞 Telefono: *+39 0923 000000*\n` +
+      `📞 Telefono: *+39 0923 361191*\n` +
       `📧 Email: *info@depasqualeimpianti.it*\n` +
       `🌐 Web: *www.depasqualeimpianti.it*\n\n` +
       `📍 Marsala (TP), Sicilia\n\n` +
@@ -188,7 +188,7 @@ function generaRisposta(testo, from) {
   return (
     `❓ Non ho capito la tua richiesta.\n\n` +
     `Scrivi *menu* per vedere tutte le opzioni disponibili, oppure chiamaci al:\n` +
-    `📞 *+39 0923 000000*\n\n` +
+    `📞 *+39 0923 361191*\n\n` +
     `Siamo qui per aiutarti! 😊`
   );
 }
