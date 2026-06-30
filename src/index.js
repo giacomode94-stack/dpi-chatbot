@@ -68,7 +68,8 @@ function generaRisposta(testo, from) {
     testo === "start"
   ) {
     return (
-      `Siamo specializzati in:\n` +
+      `👋 Benvenuto in *De Pasquale Impianti*!\n\n` +
+            `Siamo specializzati in:\n` +
             `⚡ Impianti Elettrici, Idrici, Riscaldamento\n` +
             `❄️ Climatizzazione & Pompe di Calore\n` +
             `☀️ Impianti Fotovoltaici\n` +
@@ -93,6 +94,7 @@ function generaRisposta(testo, from) {
       `Inviaci:\n` +
             `• Nome e cognome\n` +
             `• Tipo di intervento (es. pompa di calore, fotovoltaico, impianto elettrico...)\n` +
+            `• Comune dove si trova l'immobile\n` +
       `• Tipo di immobile (appartamento, villa, capannone...)\n\n` +
       `Puoi scriverci qui su WhatsApp oppure chiamarci al:\n` +
             `📞 *+39 0923 361191*\n\n` +
@@ -116,7 +118,6 @@ function generaRisposta(testo, from) {
             `Videosorveglianza, automazioni cancelli e accessi\n\n` +
             `🔥 *Caldaie*\n` +
             `Installazione, manutenzione e assistenza\n\n` +
-      `Diagnosi energetica, Conto Termico 3.0, Superbonus\n\n` +
       `Per info scrivi *preventivo* oppure *contatti* 👇`
     );
   }
