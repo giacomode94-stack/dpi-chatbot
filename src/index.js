@@ -122,7 +122,7 @@ const STEP_GUASTO = [
   },
   {
     chiave: "foto",
-    domanda: "📷 Se vuoi, invia una *foto* del guasto, oppure premi *Salta foto*",
+    domanda: "📷 Se vuoi, invia una *foto* o un *video* del guasto, oppure premi *Salta foto*",
     facoltativo: true,
   },
   {
@@ -303,35 +303,41 @@ async function gestisciStepFlusso(from, message) {
     return;
   }
 
-  // Step foto (facoltativo, con pulsante per terminare, fino a MAX_FOTO immagini)
-  // Le foto possono arrivare come tipo "image" (invio standard/compresso)
-  // oppure come tipo "document" (quando il cliente invia il file non
+  // Step foto/video (facoltativo, con pulsante per terminare, fino a MAX_FOTO file)
+  // I file possono arrivare come tipo "image" (foto standard/compressa),
+  // "video", oppure "document" (quando il cliente invia un file non
   // compresso, es. dall'icona "documento" o da un file manager).
   if (stepCorrente.chiave === "foto") {
     const eImmagine = message.type === "image";
-    const eDocumentoImmagine =
+    const eVideo = message.type === "video";
+    const eDocumentoMedia =
       message.type === "document" &&
-      message.document?.mime_type?.startsWith("image/");
+      (message.document?.mime_type?.startsWith("image/") ||
+        message.document?.mime_type?.startsWith("video/"));
 
     if (!Array.isArray(sessione.dati.foto)) sessione.dati.foto = [];
 
-    if (eImmagine || eDocumentoImmagine) {
+    if (eImmagine || eVideo || eDocumentoMedia) {
       try {
-        const mediaId = eImmagine ? message.image.id : message.document.id;
+        const mediaId = eImmagine
+          ? message.image.id
+          : eVideo
+          ? message.video.id
+          : message.document.id;
         const { buffer, mimeType } = await scaricaMedia(mediaId);
         sessione.dati.foto.push({ buffer, mimeType });
       } catch (err) {
-        console.error("❌ Errore download foto:", err.message);
+        console.error("❌ Errore download foto/video:", err.message);
       }
 
       if (sessione.dati.foto.length >= MAX_FOTO) {
         // Limite raggiunto: passiamo automaticamente alla domanda successiva
         sessione.ultimoAggiornamento = Date.now();
-        avanzaStep(from, sessione, steps, `📷 Ho già ricevuto ${MAX_FOTO} foto, grazie!`);
+        avanzaStep(from, sessione, steps, `📷 Ho già ricevuto ${MAX_FOTO} file, grazie!`);
       } else {
         await inviaBottoni(
           from,
-          `📷 Foto ricevuta (${sessione.dati.foto.length}/${MAX_FOTO}). Puoi inviarne altre oppure premere il pulsante per continuare.`,
+          `📷 File ricevuto (${sessione.dati.foto.length}/${MAX_FOTO}). Puoi inviarne altri oppure premere il pulsante per continuare.`,
           [{ id: "foto_salta", title: "Fine foto" }]
         );
       }
@@ -340,18 +346,21 @@ async function gestisciStepFlusso(from, message) {
       avanzaStep(from, sessione, steps);
       return;
     } else {
-      await inviaBottoni(from, "📷 Invia una foto oppure premi il pulsante per continuare senza.", [
+      await inviaBottoni(from, "📷 Invia una foto/video oppure premi il pulsante per continuare senza.", [
         { id: "foto_salta", title: "Salta foto" },
       ]);
       return;
     }
   }
 
-  // Foto ricevute dopo che il limite (o lo step foto) è già stato superato:
-  // avvisiamo il cliente ed evitiamo il messaggio generico "serve testo".
+  // Foto/video ricevuti dopo che il limite (o lo step foto) è già stato
+  // superato: avvisiamo il cliente ed evitiamo il messaggio generico "serve testo".
   if (
     (message.type === "image" ||
-      (message.type === "document" && message.document?.mime_type?.startsWith("image/"))) &&
+      message.type === "video" ||
+      (message.type === "document" &&
+        (message.document?.mime_type?.startsWith("image/") ||
+          message.document?.mime_type?.startsWith("video/")))) &&
     stepCorrente.chiave !== "foto"
   ) {
     await inviaMessaggio(
@@ -450,6 +459,17 @@ async function avanzaStep(from, sessione, steps, prefisso) {
   }
 }
 
+function estensioneDaMime(mimeType) {
+  if (!mimeType) return "bin";
+  if (mimeType.includes("png")) return "png";
+  if (mimeType.includes("jpeg") || mimeType.includes("jpg")) return "jpg";
+  if (mimeType.includes("webp")) return "webp";
+  if (mimeType.includes("mp4")) return "mp4";
+  if (mimeType.includes("3gpp") || mimeType.includes("3gp")) return "3gp";
+  if (mimeType.includes("quicktime")) return "mov";
+  return "bin";
+}
+
 async function completaFlusso(from, sessione) {
   const isPreventivo = sessione.flow === "preventivo";
   const d = sessione.dati;
@@ -478,14 +498,14 @@ async function completaFlusso(from, sessione) {
     html += `<p><strong>Email cliente:</strong> ${d.email || "-"}</p>`;
     html += `<p><strong>Urgente:</strong> ${d.urgente || "-"}</p>`;
     const numFoto = Array.isArray(d.foto) ? d.foto.length : 0;
-    html += `<p><strong>Foto allegate:</strong> ${numFoto > 0 ? `${numFoto} (vedi allegati)` : "No"}</p>`;
+    html += `<p><strong>Foto/video allegati:</strong> ${numFoto > 0 ? `${numFoto} (vedi allegati)` : "No"}</p>`;
   }
 
   const attachments = [];
   if (!isPreventivo && Array.isArray(d.foto)) {
     d.foto.forEach((f, i) => {
       attachments.push({
-        filename: `foto_guasto_${i + 1}.` + (f.mimeType.includes("png") ? "png" : "jpg"),
+        filename: `allegato_guasto_${i + 1}.${estensioneDaMime(f.mimeType)}`,
         content: f.buffer,
         contentType: f.mimeType,
       });
