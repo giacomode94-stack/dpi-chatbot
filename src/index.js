@@ -1,4 +1,5 @@
 const express = require("express");
+const nodemailer = require("nodemailer");
 const app = express();
 app.use(express.json());
 
@@ -6,6 +7,100 @@ const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "dpi_chatbot_token";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
+
+const GMAIL_USER = process.env.GMAIL_USER || "depasqualeimpianti@gmail.com";
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+const EMAIL_DESTINATARIO = process.env.EMAIL_DESTINATARIO || "info@depasqualeimpianti.com";
+
+// ─── CONFIGURAZIONE EMAIL (Gmail SMTP) ─────────────────────────────────────────
+const transporter = nodemailer.createTransport({
+  service: "gmail",
+  auth: {
+    user: GMAIL_USER,
+    pass: GMAIL_APP_PASSWORD,
+  },
+});
+
+async function inviaEmail({ oggetto, html, attachments }) {
+  try {
+    await transporter.sendMail({
+      from: `"DPI Chatbot" <${GMAIL_USER}>`,
+      to: EMAIL_DESTINATARIO,
+      subject: oggetto,
+      html: html,
+      attachments: attachments || [],
+    });
+    console.log(`✅ Email inviata: ${oggetto}`);
+    return true;
+  } catch (err) {
+    console.error("❌ Errore invio email:", err.message);
+    return false;
+  }
+}
+
+// ─── STATO CONVERSAZIONI (in memoria) ───────────────────────────────────────────
+// Map: numero_cliente -> { flow, stepIndex, dati, ultimoAggiornamento, followUpInviato }
+const stato = new Map();
+
+const STEP_PREVENTIVO = [
+  { chiave: "nome", domanda: "📝 Qual è il tuo *nome e cognome*?" },
+  {
+    chiave: "tipo_intervento",
+    domanda:
+      "🔧 Che tipo di intervento ti serve?\n(es. pompa di calore, fotovoltaico, impianto elettrico, caldaia, TVCC...)",
+  },
+  { chiave: "comune", domanda: "📍 In che *comune* si trova l'immobile?" },
+  {
+    chiave: "tipo_immobile",
+    domanda: "🏠 Che tipo di immobile è? (appartamento, villa, capannone...)",
+  },
+  {
+    chiave: "telefono",
+    domanda: "📞 Lasciaci un *numero di telefono* per essere ricontattato",
+  },
+];
+
+const STEP_GUASTO = [
+  { chiave: "nome", domanda: "📝 Qual è il tuo *nome e cognome*?" },
+  {
+    chiave: "tipo_impianto",
+    domanda:
+      "🔧 Che tipo di impianto ha il problema?\n(elettrico, idrico, climatizzazione, fotovoltaico, caldaia...)",
+  },
+  {
+    chiave: "descrizione",
+    domanda: "📋 Descrivi brevemente il problema riscontrato",
+  },
+  {
+    chiave: "comune",
+    domanda: "📍 Indicami *comune e indirizzo* dell'immobile",
+  },
+  {
+    chiave: "foto",
+    domanda:
+      "📷 Se vuoi, invia una *foto* del guasto.\nSe non necessaria, scrivi *salta*",
+    facoltativo: true,
+  },
+  {
+    chiave: "telefono",
+    domanda: "📞 Lasciaci un *numero di telefono* per essere richiamato",
+  },
+  { chiave: "urgente", domanda: "🚨 È un caso *urgente*? (sì/no)" },
+];
+
+function nuovaSessione(flow) {
+  return {
+    flow: flow,
+    stepIndex: 0,
+    dati: {},
+    ultimoAggiornamento: Date.now(),
+    followUpInviato: false,
+  };
+}
+
+function getSteps(flow) {
+  return flow === "preventivo" ? STEP_PREVENTIVO : STEP_GUASTO;
+}
 
 // ─── WEBHOOK VERIFICA (Meta lo chiama per verificare l'endpoint) ───────────────
 app.get("/webhook", (req, res) => {
@@ -37,25 +132,214 @@ app.post("/webhook", async (req, res) => {
   if (!messages || messages.length === 0) return;
 
   const message = messages[0];
-  const from = message.from; // Numero mittente
+  const from = message.from;
   const tipo = message.type;
 
   console.log(`📩 Messaggio da ${from} (tipo: ${tipo})`);
 
-  if (tipo === "text") {
-    const testo = message.text.body.trim().toLowerCase();
-    const risposta = generaRisposta(testo, from);
-    await inviaMEssaggio(from, risposta);
-  } else {
-    await inviaMEssaggio(
-      from,
-      "Ciao! Al momento gestisco solo messaggi di testo. Scrivi *aiuto* per vedere cosa posso fare."
-    );
+  try {
+    // Se il cliente è dentro un flusso guidato, gestiamo lo step
+    if (stato.has(from)) {
+      await gestisciStepFlusso(from, message);
+      return;
+    }
+
+    if (tipo === "text") {
+      const testo = message.text.body.trim().toLowerCase();
+
+      // Avvio flusso preventivo
+      if (testo.includes("preventivo") || testo === "1") {
+        stato.set(from, nuovaSessione("preventivo"));
+        await inviaMessaggio(
+          from,
+          `📋 *Richiesta Preventivo*\n\nTi faccio qualche domanda veloce, un passo alla volta. Scrivi *annulla* in qualsiasi momento per interrompere.\n\n${STEP_PREVENTIVO[0].domanda}`
+        );
+        return;
+      }
+
+      // Avvio flusso guasto/assistenza
+      if (
+        testo.includes("guasto") ||
+        testo.includes("assistenza") ||
+        testo === "6"
+      ) {
+        stato.set(from, nuovaSessione("guasto"));
+        await inviaMessaggio(
+          from,
+          `🛠️ *Richiesta Guasto / Assistenza*\n\nTi faccio qualche domanda veloce, un passo alla volta. Scrivi *annulla* in qualsiasi momento per interrompere.\n\n${STEP_GUASTO[0].domanda}`
+        );
+        return;
+      }
+
+      const risposta = generaRisposta(testo);
+      await inviaMessaggio(from, risposta);
+    } else {
+      await inviaMessaggio(
+        from,
+        "Ciao! Al momento gestisco solo messaggi di testo. Scrivi *aiuto* per vedere cosa posso fare."
+      );
+    }
+  } catch (err) {
+    console.error("❌ Errore gestione messaggio:", err.message);
   }
 });
 
-// ─── LOGICA RISPOSTE ───────────────────────────────────────────────────────────
-function generaRisposta(testo, from) {
+// ─── GESTIONE STEP DEI FLUSSI GUIDATI ──────────────────────────────────────────
+async function gestisciStepFlusso(from, message) {
+  const sessione = stato.get(from);
+  const steps = getSteps(sessione.flow);
+  const stepCorrente = steps[sessione.stepIndex];
+
+  const testoGrezzo =
+    message.type === "text" ? message.text.body.trim() : null;
+  const testoLower = testoGrezzo ? testoGrezzo.toLowerCase() : "";
+
+  // Comando annulla, disponibile in ogni momento
+  if (testoLower === "annulla") {
+    stato.delete(from);
+    await inviaMessaggio(
+      from,
+      "❌ Richiesta annullata. Scrivi *menu* per ricominciare quando vuoi."
+    );
+    return;
+  }
+
+  // Step foto (facoltativo)
+  if (stepCorrente.chiave === "foto") {
+    if (message.type === "image") {
+      try {
+        const mediaId = message.image.id;
+        const { buffer, mimeType } = await scaricaMedia(mediaId);
+        sessione.dati.foto = { buffer, mimeType };
+      } catch (err) {
+        console.error("❌ Errore download foto:", err.message);
+        sessione.dati.foto = null;
+      }
+    } else if (testoLower === "salta" || testoLower === "no") {
+      sessione.dati.foto = null;
+    } else {
+      await inviaMessaggio(
+        from,
+        "📷 Invia una foto oppure scrivi *salta* per continuare senza."
+      );
+      return;
+    }
+    avanzaStep(from, sessione, steps);
+    return;
+  }
+
+  // Step testuali normali
+  if (message.type !== "text") {
+    await inviaMessaggio(
+      from,
+      "Per questa domanda mi serve una risposta testuale 🙂"
+    );
+    return;
+  }
+
+  sessione.dati[stepCorrente.chiave] = testoGrezzo;
+  avanzaStep(from, sessione, steps);
+}
+
+async function avanzaStep(from, sessione, steps) {
+  sessione.stepIndex++;
+  sessione.ultimoAggiornamento = Date.now();
+
+  if (sessione.stepIndex < steps.length) {
+    stato.set(from, sessione);
+    await inviaMessaggio(from, steps[sessione.stepIndex].domanda);
+  } else {
+    // Flusso completato: invio email e chiusura
+    await completaFlusso(from, sessione);
+    stato.delete(from);
+  }
+}
+
+async function completaFlusso(from, sessione) {
+  const isPreventivo = sessione.flow === "preventivo";
+  const d = sessione.dati;
+
+  const oggetto = isPreventivo
+    ? "Richiesta da chatbot DPI – Preventivo"
+    : "Richiesta da chatbot DPI – Guasto/Assistenza";
+
+  let html = `<h2>${
+    isPreventivo ? "Nuova richiesta di preventivo" : "Nuova richiesta di assistenza/guasto"
+  }</h2>`;
+  html += `<p><strong>Numero WhatsApp cliente:</strong> ${from}</p>`;
+  html += `<p><strong>Nome e cognome:</strong> ${d.nome || "-"}</p>`;
+
+  if (isPreventivo) {
+    html += `<p><strong>Tipo di intervento:</strong> ${d.tipo_intervento || "-"}</p>`;
+    html += `<p><strong>Comune:</strong> ${d.comune || "-"}</p>`;
+    html += `<p><strong>Tipo di immobile:</strong> ${d.tipo_immobile || "-"}</p>`;
+    html += `<p><strong>Telefono:</strong> ${d.telefono || "-"}</p>`;
+  } else {
+    html += `<p><strong>Tipo di impianto:</strong> ${d.tipo_impianto || "-"}</p>`;
+    html += `<p><strong>Descrizione problema:</strong> ${d.descrizione || "-"}</p>`;
+    html += `<p><strong>Comune/indirizzo:</strong> ${d.comune || "-"}</p>`;
+    html += `<p><strong>Telefono:</strong> ${d.telefono || "-"}</p>`;
+    html += `<p><strong>Urgente:</strong> ${d.urgente || "-"}</p>`;
+    html += `<p><strong>Foto allegata:</strong> ${d.foto ? "Sì (vedi allegato)" : "No"}</p>`;
+  }
+
+  const attachments = [];
+  if (!isPreventivo && d.foto) {
+    attachments.push({
+      filename: "foto_guasto." + (d.foto.mimeType.includes("png") ? "png" : "jpg"),
+      content: d.foto.buffer,
+      contentType: d.foto.mimeType,
+    });
+  }
+
+  await inviaEmail({ oggetto, html, attachments });
+
+  await inviaMessaggio(
+    from,
+    `✅ Grazie ${d.nome || ""}! Abbiamo ricevuto la tua richiesta.\n\nUn nostro tecnico ti ricontatterà al più presto.\n\nPer altre richieste scrivi *menu* 👋`
+  );
+}
+
+// ─── SCARICA MEDIA DA WHATSAPP (per le foto) ───────────────────────────────────
+async function scaricaMedia(mediaId) {
+  const metaRes = await fetch(`https://graph.facebook.com/v19.0/${mediaId}`, {
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+  });
+  const metaData = await metaRes.json();
+
+  const fileRes = await fetch(metaData.url, {
+    headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}` },
+  });
+  const arrayBuffer = await fileRes.arrayBuffer();
+
+  return {
+    buffer: Buffer.from(arrayBuffer),
+    mimeType: metaData.mime_type || "image/jpeg",
+  };
+}
+
+// ─── FOLLOW-UP AUTOMATICO SU FLUSSI ABBANDONATI ────────────────────────────────
+const SOGLIA_FOLLOWUP_MS = 24 * 60 * 60 * 1000; // 24 ore
+
+setInterval(() => {
+  const ora = Date.now();
+  for (const [from, sessione] of stato.entries()) {
+    if (
+      !sessione.followUpInviato &&
+      ora - sessione.ultimoAggiornamento > SOGLIA_FOLLOWUP_MS
+    ) {
+      sessione.followUpInviato = true;
+      stato.set(from, sessione);
+      inviaMessaggio(
+        from,
+        "👋 Ciao! Hai ancora bisogno del preventivo/assistenza? Siamo qui per aiutarti, basta rispondere a questo messaggio per continuare 😊"
+      ).catch((err) => console.error("❌ Errore follow-up:", err.message));
+    }
+  }
+}, 60 * 60 * 1000); // controllo ogni ora
+
+// ─── LOGICA RISPOSTE MENU STATICO ──────────────────────────────────────────────
+function generaRisposta(testo) {
   // Menu principale
   if (
     testo === "ciao" ||
@@ -69,36 +353,21 @@ function generaRisposta(testo, from) {
   ) {
     return (
       `👋 Benvenuto in *De Pasquale Impianti*!\n\n` +
-            `Siamo specializzati in:\n` +
-            `⚡ Impianti Elettrici, Idrici, Riscaldamento\n` +
-            `❄️ Climatizzazione & Pompe di Calore\n` +
-            `☀️ Impianti Fotovoltaici\n` +
-            `🏠 Efficienza Energetica\n` +
-            `📹 TVCC - Automazioni\n` +
-            `🔥 Caldaie\n\n` +
-            `Scegli un'opzione:\n` +
-            `1️⃣ *preventivo* - Richiedi un preventivo\n` +
-            `2️⃣ *servizi* - I nostri servizi\n` +
-            `3️⃣ *conto termico* - Info incentivi\n` +
-            `4️⃣ *contatti* - Parlare con noi\n` +
-            `5️⃣ *urgente* - Richiesta intervento urgente\n\n` +
+      `Siamo specializzati in:\n` +
+      `⚡ Impianti Elettrici, Idrici, Riscaldamento\n` +
+      `❄️ Climatizzazione & Pompe di Calore\n` +
+      `☀️ Impianti Fotovoltaici\n` +
+      `🏠 Efficienza Energetica\n` +
+      `📹 TVCC - Automazioni\n` +
+      `🔥 Caldaie\n\n` +
+      `Scegli un'opzione:\n` +
+      `1️⃣ *preventivo* - Richiedi un preventivo\n` +
+      `2️⃣ *servizi* - I nostri servizi\n` +
+      `3️⃣ *conto termico* - Info incentivi\n` +
+      `4️⃣ *contatti* - Parlare con noi\n` +
+      `5️⃣ *urgente* - Richiesta intervento urgente\n` +
+      `6️⃣ *guasto* - Segnala un guasto / richiedi assistenza\n\n` +
       `Rispondi con il numero o la parola chiave 👆`
-    );
-  }
-
-  // Preventivo
-  if (testo.includes("preventivo") || testo === "1") {
-    return (
-      `📋 *Richiesta Preventivo*\n\n` +
-      `Per preparare un preventivo personalizzato abbiamo bisogno di alcune informazioni.\n\n` +
-      `Inviaci:\n` +
-            `• Nome e cognome\n` +
-            `• Tipo di intervento (es. pompa di calore, fotovoltaico, impianto elettrico...)\n` +
-            `• Comune dove si trova l'immobile\n` +
-      `• Tipo di immobile (appartamento, villa, capannone...)\n\n` +
-      `Puoi scriverci qui su WhatsApp oppure chiamarci al:\n` +
-            `📞 *+39 0923 361191*\n\n` +
-      `Un nostro tecnico ti ricontatterà entro 24 ore! ✅`
     );
   }
 
@@ -106,18 +375,18 @@ function generaRisposta(testo, from) {
   if (testo.includes("servizi") || testo === "2") {
     return (
       `🔧 *I Nostri Servizi*\n\n` +
-            `⚡ *Impianti Elettrici, Idrici, Riscaldamento*\n` +
-            `Civili, industriali, CCTV, allarmi, cancelli\n\n` +
-            `❄️ *Climatizzazione & Pompe di Calore*\n` +
-            `Pompe di calore, split, VMC, riscaldamento a pavimento\n\n` +
-            `☀️ *Impianti Fotovoltaici*\n` +
-            `Residenziale e industriale, con accumulo e colonnine EV\n\n` +
-            `🏠 *Efficienza Energetica*\n` +
-            `Diagnosi energetica, Conto Termico 3.0, Superbonus\n\n` +
-            `📹 *TVCC - Automazioni*\n` +
-            `Videosorveglianza, automazioni cancelli e accessi\n\n` +
-            `🔥 *Caldaie*\n` +
-            `Installazione, manutenzione e assistenza\n\n` +
+      `⚡ *Impianti Elettrici, Idrici, Riscaldamento*\n` +
+      `Civili, industriali, CCTV, allarmi, cancelli\n\n` +
+      `❄️ *Climatizzazione & Pompe di Calore*\n` +
+      `Pompe di calore, split, VMC, riscaldamento a pavimento\n\n` +
+      `☀️ *Impianti Fotovoltaici*\n` +
+      `Residenziale e industriale, con accumulo e colonnine EV\n\n` +
+      `🏠 *Efficienza Energetica*\n` +
+      `Diagnosi energetica, Conto Termico 3.0, Superbonus\n\n` +
+      `📹 *TVCC - Automazioni*\n` +
+      `Videosorveglianza, automazioni cancelli e accessi\n\n` +
+      `🔥 *Caldaie*\n` +
+      `Installazione, manutenzione e assistenza\n\n` +
       `Per info scrivi *preventivo* oppure *contatti* 👇`
     );
   }
@@ -147,28 +416,24 @@ function generaRisposta(testo, from) {
       `📍 *De Pasquale Impianti Srl*\n\n` +
       `📞 Telefono: *+39 0923 361191*\n` +
       `📧 Email: info@depasqualeimpianti.com\n` +
-            `🌐 Web: www.depasqualeimpianti.com\n\n` +
-            `📍 Marsala (TP), Sicilia\n\n` +
-            `🕐 Orari ufficio:\n` +
-            `Lun-Ven: 9:00 - 18:30\n` +
-            `Sab-Dom: chiusi\n\n` +
+      `🌐 Web: www.depasqualeimpianti.com\n\n` +
+      `📍 Marsala (TP), Sicilia\n\n` +
+      `🕐 Orari ufficio:\n` +
+      `Lun-Ven: 9:00 - 18:30\n` +
+      `Sab-Dom: chiusi\n\n` +
       `Per un preventivo rapido scrivi *preventivo* 👆`
     );
   }
 
-    // Intervento urgente
-    if (
-          testo.includes("urgente") ||
-          testo.includes("emergenza") ||
-          testo === "5"
-        ) {
-          return (
-                  `🚨 *Richiesta Intervento Urgente*\n\n` +
-                  `Per le emergenze ti invitiamo a visitare il nostro sito web:\n` +
-                  `🌐 www.depasqualeimpianti.com\n\n` +
-                  `Scrivici tramite la nostra *live chat* presente sul sito: un operatore ti risponderà il prima possibile! ⚡`
-                );
-    }
+  // Intervento urgente
+  if (testo.includes("urgente") || testo.includes("emergenza") || testo === "5") {
+    return (
+      `🚨 *Richiesta Intervento Urgente*\n\n` +
+      `Per le emergenze ti invitiamo a visitare il nostro sito web:\n` +
+      `🌐 www.depasqualeimpianti.com\n\n` +
+      `Scrivici tramite la nostra *live chat* presente sul sito: un operatore ti risponderà il prima possibile! ⚡`
+    );
+  }
 
   // Fotovoltaico
   if (
@@ -216,7 +481,7 @@ function generaRisposta(testo, from) {
 }
 
 // ─── INVIO MESSAGGIO VIA API WHATSAPP ─────────────────────────────────────────
-async function inviaMEssaggio(to, testo) {
+async function inviaMessaggio(to, testo) {
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
 
   try {
@@ -250,7 +515,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "✅ DPI Chatbot attivo",
     numero: "+39 389 638 4755",
-    versione: "1.0.0",
+    versione: "2.0.0",
   });
 });
 
