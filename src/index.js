@@ -76,6 +76,10 @@ const STEP_PREVENTIVO = [
     chiave: "telefono",
     domanda: "📞 Lasciaci un *numero di telefono* per essere ricontattato",
   },
+  {
+    chiave: "email",
+    domanda: "📧 Qual è la tua *email*? (ci serve per inviarti il preventivo)",
+  },
 ];
 
 const STEP_GUASTO = [
@@ -292,6 +296,7 @@ async function completaFlusso(from, sessione) {
     html += `<p><strong>Comune:</strong> ${d.comune || "-"}</p>`;
     html += `<p><strong>Tipo di immobile:</strong> ${d.tipo_immobile || "-"}</p>`;
     html += `<p><strong>Telefono:</strong> ${d.telefono || "-"}</p>`;
+    html += `<p><strong>Email cliente:</strong> ${d.email || "-"}</p>`;
   } else {
     html += `<p><strong>Tipo di impianto:</strong> ${d.tipo_impianto || "-"}</p>`;
     html += `<p><strong>Descrizione problema:</strong> ${d.descrizione || "-"}</p>`;
