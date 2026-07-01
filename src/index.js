@@ -13,12 +13,22 @@ const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
 const EMAIL_DESTINATARIO = process.env.EMAIL_DESTINATARIO || "info@depasqualeimpianti.com";
 
 // ─── CONFIGURAZIONE EMAIL (Gmail SMTP) ─────────────────────────────────────────
+const dns = require("dns");
+// Forza la risoluzione IPv4: su Render la risoluzione IPv6 di smtp.gmail.com
+// causa spesso timeout di connessione.
+dns.setDefaultResultOrder("ipv4first");
+
 const transporter = nodemailer.createTransport({
-  service: "gmail",
+  host: "smtp.gmail.com",
+  port: 465,
+  secure: true,
   auth: {
     user: GMAIL_USER,
     pass: GMAIL_APP_PASSWORD,
   },
+  connectionTimeout: 15000,
+  greetingTimeout: 15000,
+  socketTimeout: 15000,
 });
 
 async function inviaEmail({ oggetto, html, attachments }) {
