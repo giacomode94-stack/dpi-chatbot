@@ -288,10 +288,18 @@ async function gestisciStepFlusso(from, message) {
   }
 
   // Step foto (facoltativo, con pulsante "Salta foto")
+  // Le foto possono arrivare come tipo "image" (invio standard/compresso)
+  // oppure come tipo "document" (quando il cliente invia il file non
+  // compresso, es. dall'icona "documento" o da un file manager).
   if (stepCorrente.chiave === "foto") {
-    if (message.type === "image") {
+    const eImmagine = message.type === "image";
+    const eDocumentoImmagine =
+      message.type === "document" &&
+      message.document?.mime_type?.startsWith("image/");
+
+    if (eImmagine || eDocumentoImmagine) {
       try {
-        const mediaId = message.image.id;
+        const mediaId = eImmagine ? message.image.id : message.document.id;
         const { buffer, mimeType } = await scaricaMedia(mediaId);
         sessione.dati.foto = { buffer, mimeType };
       } catch (err) {
