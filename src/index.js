@@ -130,8 +130,14 @@ const STEP_GUASTO = [
     chiave: "telefono",
     domanda: "📞 Lasciaci un *numero di telefono* per essere richiamato",
   },
+  {
+    chiave: "email",
+    domanda: "📧 Qual è la tua *email*? (utile per aggiornamenti sulla richiesta)",
+  },
   { chiave: "urgente", domanda: "🚨 È un caso urgente?" },
 ];
+
+const MAX_FOTO = 10;
 
 function nuovaSessione(flow) {
   return {
@@ -287,7 +293,7 @@ async function gestisciStepFlusso(from, message) {
     return;
   }
 
-  // Step foto (facoltativo, con pulsante "Salta foto")
+  // Step foto (facoltativo, con pulsante per terminare, fino a MAX_FOTO immagini)
   // Le foto possono arrivare come tipo "image" (invio standard/compresso)
   // oppure come tipo "document" (quando il cliente invia il file non
   // compresso, es. dall'icona "documento" o da un file manager).
@@ -297,24 +303,51 @@ async function gestisciStepFlusso(from, message) {
       message.type === "document" &&
       message.document?.mime_type?.startsWith("image/");
 
+    if (!Array.isArray(sessione.dati.foto)) sessione.dati.foto = [];
+
     if (eImmagine || eDocumentoImmagine) {
       try {
         const mediaId = eImmagine ? message.image.id : message.document.id;
         const { buffer, mimeType } = await scaricaMedia(mediaId);
-        sessione.dati.foto = { buffer, mimeType };
+        sessione.dati.foto.push({ buffer, mimeType });
       } catch (err) {
         console.error("❌ Errore download foto:", err.message);
-        sessione.dati.foto = null;
       }
+
+      if (sessione.dati.foto.length >= MAX_FOTO) {
+        // Limite raggiunto: passiamo automaticamente alla domanda successiva
+        sessione.ultimoAggiornamento = Date.now();
+        avanzaStep(from, sessione, steps, `📷 Ho già ricevuto ${MAX_FOTO} foto, grazie!`);
+      } else {
+        await inviaBottoni(
+          from,
+          `📷 Foto ricevuta (${sessione.dati.foto.length}/${MAX_FOTO}). Puoi inviarne altre oppure premere il pulsante per continuare.`,
+          [{ id: "foto_salta", title: "Fine foto" }]
+        );
+      }
+      return;
     } else if (idBottone === "foto_salta" || testoLower === "salta" || testoLower === "no") {
-      sessione.dati.foto = null;
+      avanzaStep(from, sessione, steps);
+      return;
     } else {
       await inviaBottoni(from, "📷 Invia una foto oppure premi il pulsante per continuare senza.", [
         { id: "foto_salta", title: "Salta foto" },
       ]);
       return;
     }
-    avanzaStep(from, sessione, steps);
+  }
+
+  // Foto ricevute dopo che il limite (o lo step foto) è già stato superato:
+  // avvisiamo il cliente ed evitiamo il messaggio generico "serve testo".
+  if (
+    (message.type === "image" ||
+      (message.type === "document" && message.document?.mime_type?.startsWith("image/"))) &&
+    stepCorrente.chiave !== "foto"
+  ) {
+    await inviaMessaggio(
+      from,
+      `📷 Ho già ricevuto le foto necessarie, grazie! ${stepCorrente.domanda}`
+    );
     return;
   }
 
@@ -352,25 +385,26 @@ async function gestisciStepFlusso(from, message) {
   avanzaStep(from, sessione, steps);
 }
 
-async function avanzaStep(from, sessione, steps) {
+async function avanzaStep(from, sessione, steps, prefisso) {
   sessione.stepIndex++;
   sessione.ultimoAggiornamento = Date.now();
 
   if (sessione.stepIndex < steps.length) {
     stato.set(from, sessione);
     const prossimo = steps[sessione.stepIndex];
+    const testoDomanda = prefisso ? `${prefisso}\n\n${prossimo.domanda}` : prossimo.domanda;
 
     if (prossimo.chiave === "foto") {
-      await inviaBottoni(from, prossimo.domanda, [
+      await inviaBottoni(from, testoDomanda, [
         { id: "foto_salta", title: "Salta foto" },
       ]);
     } else if (prossimo.chiave === "urgente") {
-      await inviaBottoni(from, prossimo.domanda, [
+      await inviaBottoni(from, testoDomanda, [
         { id: "urgente_si", title: "Sì" },
         { id: "urgente_no", title: "No" },
       ]);
     } else {
-      await inviaMessaggio(from, prossimo.domanda);
+      await inviaMessaggio(from, testoDomanda);
     }
   } else {
     // Flusso completato: invio email e chiusura
@@ -404,16 +438,20 @@ async function completaFlusso(from, sessione) {
     html += `<p><strong>Descrizione problema:</strong> ${d.descrizione || "-"}</p>`;
     html += `<p><strong>Comune/indirizzo:</strong> ${d.comune || "-"}</p>`;
     html += `<p><strong>Telefono:</strong> ${d.telefono || "-"}</p>`;
+    html += `<p><strong>Email cliente:</strong> ${d.email || "-"}</p>`;
     html += `<p><strong>Urgente:</strong> ${d.urgente || "-"}</p>`;
-    html += `<p><strong>Foto allegata:</strong> ${d.foto ? "Sì (vedi allegato)" : "No"}</p>`;
+    const numFoto = Array.isArray(d.foto) ? d.foto.length : 0;
+    html += `<p><strong>Foto allegate:</strong> ${numFoto > 0 ? `${numFoto} (vedi allegati)` : "No"}</p>`;
   }
 
   const attachments = [];
-  if (!isPreventivo && d.foto) {
-    attachments.push({
-      filename: "foto_guasto." + (d.foto.mimeType.includes("png") ? "png" : "jpg"),
-      content: d.foto.buffer,
-      contentType: d.foto.mimeType,
+  if (!isPreventivo && Array.isArray(d.foto)) {
+    d.foto.forEach((f, i) => {
+      attachments.push({
+        filename: `foto_guasto_${i + 1}.` + (f.mimeType.includes("png") ? "png" : "jpg"),
+        content: f.buffer,
+        contentType: f.mimeType,
+      });
     });
   }
 
