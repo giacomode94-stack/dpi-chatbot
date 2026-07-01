@@ -1,5 +1,4 @@
 const express = require("express");
-const nodemailer = require("nodemailer");
 const app = express();
 app.use(express.json());
 
@@ -8,40 +7,49 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "dpi_chatbot_token";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-const GMAIL_USER = process.env.GMAIL_USER || "depasqualeimpianti@gmail.com";
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+const EMAIL_MITTENTE = process.env.EMAIL_MITTENTE || "info@depasqualeimpianti.com";
 const EMAIL_DESTINATARIO = process.env.EMAIL_DESTINATARIO || "info@depasqualeimpianti.com";
 
-// ─── CONFIGURAZIONE EMAIL (Gmail SMTP) ─────────────────────────────────────────
-const dns = require("dns");
-// Forza la risoluzione IPv4: su Render la risoluzione IPv6 di smtp.gmail.com
-// causa spesso timeout di connessione.
-dns.setDefaultResultOrder("ipv4first");
-
-const transporter = nodemailer.createTransport({
-  host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
-  auth: {
-    user: GMAIL_USER,
-    pass: GMAIL_APP_PASSWORD,
-  },
-  connectionTimeout: 15000,
-  greetingTimeout: 15000,
-  socketTimeout: 15000,
-});
-
+// ─── CONFIGURAZIONE EMAIL (SendGrid via API HTTPS) ─────────────────────────────
+// Usiamo l'API HTTPS di SendGrid invece di SMTP: Render blocca le porte SMTP
+// (25/465/587) sui servizi gratuiti, ma le chiamate HTTPS non sono soggette
+// a questa restrizione.
 async function inviaEmail({ oggetto, html, attachments }) {
   try {
-    await transporter.sendMail({
-      from: `"DPI Chatbot" <${GMAIL_USER}>`,
-      to: EMAIL_DESTINATARIO,
+    const body = {
+      personalizations: [{ to: [{ email: EMAIL_DESTINATARIO }] }],
+      from: { email: EMAIL_MITTENTE, name: "DPI Chatbot" },
       subject: oggetto,
-      html: html,
-      attachments: attachments || [],
+      content: [{ type: "text/html", value: html }],
+    };
+
+    if (attachments && attachments.length > 0) {
+      body.attachments = attachments.map((a) => ({
+        content: a.content.toString("base64"),
+        filename: a.filename,
+        type: a.contentType || "application/octet-stream",
+        disposition: "attachment",
+      }));
+    }
+
+    const res = await fetch("https://api.sendgrid.com/v3/mail/send", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SENDGRID_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
     });
-    console.log(`✅ Email inviata: ${oggetto}`);
-    return true;
+
+    if (res.status >= 200 && res.status < 300) {
+      console.log(`✅ Email inviata: ${oggetto}`);
+      return true;
+    } else {
+      const errText = await res.text();
+      console.error(`❌ Errore invio email (${res.status}):`, errText);
+      return false;
+    }
   } catch (err) {
     console.error("❌ Errore invio email:", err.message);
     return false;
