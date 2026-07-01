@@ -110,8 +110,7 @@ const STEP_GUASTO = [
   { chiave: "nome", domanda: "📝 Qual è il tuo *nome e cognome*?" },
   {
     chiave: "tipo_impianto",
-    domanda:
-      "🔧 Che tipo di impianto ha il problema?\n(elettrico, idrico, climatizzazione, fotovoltaico, caldaia...)",
+    domanda: "🔧 Che tipo di impianto ha il problema?",
   },
   {
     chiave: "descrizione",
@@ -138,6 +137,17 @@ const STEP_GUASTO = [
 ];
 
 const MAX_FOTO = 10;
+
+const OPZIONI_TIPO_IMPIANTO = [
+  { id: "imp_elettrico", title: "⚡ Elettrico", label: "Elettrico" },
+  { id: "imp_idrico", title: "💧 Idrico", label: "Idrico" },
+  { id: "imp_riscaldamento", title: "🔥 Riscaldamento", label: "Riscaldamento" },
+  { id: "imp_clima", title: "❄️ Climatizzazione", label: "Climatizzazione / Pompa di calore" },
+  { id: "imp_fotovoltaico", title: "☀️ Fotovoltaico", label: "Fotovoltaico" },
+  { id: "imp_caldaia", title: "🔥 Caldaia", label: "Caldaia" },
+  { id: "imp_tvcc", title: "📹 TVCC/Automazioni", label: "TVCC / Automazioni" },
+  { id: "imp_altro", title: "❓ Altro", label: "Altro" },
+];
 
 function nuovaSessione(flow) {
   return {
@@ -351,6 +361,31 @@ async function gestisciStepFlusso(from, message) {
     return;
   }
 
+  // Step tipo impianto (lista a scelta, con fallback a testo libero)
+  if (stepCorrente.chiave === "tipo_impianto") {
+    let idLista = null;
+    if (message.type === "interactive" && message.interactive.type === "list_reply") {
+      idLista = message.interactive.list_reply.id;
+    }
+
+    const opzione = OPZIONI_TIPO_IMPIANTO.find((o) => o.id === idLista);
+    if (opzione) {
+      sessione.dati.tipo_impianto = opzione.label;
+      avanzaStep(from, sessione, steps);
+      return;
+    }
+
+    if (testoGrezzo) {
+      // Risposta testuale libera, accettata comunque
+      sessione.dati.tipo_impianto = testoGrezzo;
+      avanzaStep(from, sessione, steps);
+      return;
+    }
+
+    await inviaListaTipoImpianto(from, stepCorrente.domanda);
+    return;
+  }
+
   // Step urgente (pulsanti Sì/No)
   if (stepCorrente.chiave === "urgente") {
     if (idBottone === "urgente_si") {
@@ -403,6 +438,8 @@ async function avanzaStep(from, sessione, steps, prefisso) {
         { id: "urgente_si", title: "Sì" },
         { id: "urgente_no", title: "No" },
       ]);
+    } else if (prossimo.chiave === "tipo_impianto") {
+      await inviaListaTipoImpianto(from, testoDomanda);
     } else {
       await inviaMessaggio(from, testoDomanda);
     }
@@ -712,6 +749,28 @@ async function inviaListaMenu(to) {
               { id: "urgente", title: "🚨 Urgente", description: "Richiesta intervento urgente" },
               { id: "guasto", title: "🛠️ Guasto/Assistenza", description: "Segnala un guasto" },
             ],
+          },
+        ],
+      },
+    },
+  });
+}
+
+// ─── INVIO LISTA "TIPO DI IMPIANTO" (flusso guasto) ────────────────────────────
+async function inviaListaTipoImpianto(to, corpo) {
+  await chiamaApiWhatsapp({
+    messaging_product: "whatsapp",
+    to: to,
+    type: "interactive",
+    interactive: {
+      type: "list",
+      body: { text: corpo },
+      action: {
+        button: "Scegli opzione",
+        sections: [
+          {
+            title: "Tipo di impianto",
+            rows: OPZIONI_TIPO_IMPIANTO.map((o) => ({ id: o.id, title: o.title })),
           },
         ],
       },
