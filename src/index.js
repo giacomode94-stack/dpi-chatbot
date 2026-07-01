@@ -60,6 +60,20 @@ async function inviaEmail({ oggetto, html, attachments }) {
 // Map: numero_cliente -> { flow, stepIndex, dati, ultimoAggiornamento, followUpInviato }
 const stato = new Map();
 
+// ─── CODA DI ELABORAZIONE PER-CLIENTE ──────────────────────────────────────────
+// Garantisce che i messaggi dello stesso numero vengano elaborati uno alla
+// volta, nell'ordine di arrivo, anche se ne arrivano più ravvicinati.
+const codaPerCliente = new Map(); // from -> Promise (ultima elaborazione in corso)
+
+function accodaElaborazione(from, taskFn) {
+  const precedente = codaPerCliente.get(from) || Promise.resolve();
+  const nuova = precedente
+    .then(() => taskFn())
+    .catch((err) => console.error("❌ Errore in coda elaborazione:", err.message));
+  codaPerCliente.set(from, nuova);
+  return nuova;
+}
+
 // Map: message_id -> timestamp, per ignorare webhook duplicati da Meta
 const messaggiProcessati = new Map();
 setInterval(() => {
@@ -180,6 +194,17 @@ app.post("/webhook", async (req, res) => {
 
   console.log(`📩 Messaggio da ${from} (tipo: ${tipo})`);
 
+  // Mettiamo in coda l'elaborazione per questo cliente: se arrivano più
+  // messaggi ravvicinati (es. più foto inviate insieme), vengono gestiti
+  // uno alla volta nell'ordine di arrivo, mai in parallelo. Questo evita
+  // che due elaborazioni concorrenti leggano/scrivano lo stesso stato di
+  // sessione contemporaneamente e "saltino" dei passaggi del flusso.
+  accodaElaborazione(from, () => elaboraMessaggio(from, message));
+});
+
+async function elaboraMessaggio(from, message) {
+  const tipo = message.type;
+
   try {
     // Se il cliente è dentro un flusso guidato, gestiamo lo step
     if (stato.has(from)) {
@@ -235,7 +260,7 @@ app.post("/webhook", async (req, res) => {
   } catch (err) {
     console.error("❌ Errore gestione messaggio:", err.message);
   }
-});
+}
 
 // ─── GESTIONE STEP DEI FLUSSI GUIDATI ──────────────────────────────────────────
 async function gestisciStepFlusso(from, message) {
