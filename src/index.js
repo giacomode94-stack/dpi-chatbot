@@ -60,6 +60,16 @@ async function inviaEmail({ oggetto, html, attachments }) {
 // Map: numero_cliente -> { flow, stepIndex, dati, ultimoAggiornamento, followUpInviato }
 const stato = new Map();
 
+// Map: message_id -> timestamp, per ignorare webhook duplicati da Meta
+const messaggiProcessati = new Map();
+setInterval(() => {
+  const ora = Date.now();
+  const DIECI_MINUTI = 10 * 60 * 1000;
+  for (const [id, ts] of messaggiProcessati.entries()) {
+    if (ora - ts > DIECI_MINUTI) messaggiProcessati.delete(id);
+  }
+}, 5 * 60 * 1000);
+
 const STEP_PREVENTIVO = [
   { chiave: "nome", domanda: "📝 Qual è il tuo *nome e cognome*?" },
   {
@@ -155,6 +165,18 @@ app.post("/webhook", async (req, res) => {
   const message = messages[0];
   const from = message.from;
   const tipo = message.type;
+
+  // ─── DEDUPLICAZIONE MESSAGGI ──────────────────────────────────────────────
+  // WhatsApp può recapitare lo stesso webhook più di una volta (retry di rete).
+  // Teniamo traccia degli ID già processati per evitare doppie elaborazioni
+  // (es. email di preventivo/guasto inviate due volte).
+  if (message.id && messaggiProcessati.has(message.id)) {
+    console.log(`⏭️ Messaggio duplicato ignorato: ${message.id}`);
+    return;
+  }
+  if (message.id) {
+    messaggiProcessati.set(message.id, Date.now());
+  }
 
   console.log(`📩 Messaggio da ${from} (tipo: ${tipo})`);
 
