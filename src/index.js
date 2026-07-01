@@ -99,15 +99,14 @@ const STEP_GUASTO = [
   },
   {
     chiave: "foto",
-    domanda:
-      "📷 Se vuoi, invia una *foto* del guasto.\nSe non necessaria, scrivi *salta*",
+    domanda: "📷 Se vuoi, invia una *foto* del guasto, oppure premi *Salta foto*",
     facoltativo: true,
   },
   {
     chiave: "telefono",
     domanda: "📞 Lasciaci un *numero di telefono* per essere richiamato",
   },
-  { chiave: "urgente", domanda: "🚨 È un caso *urgente*? (sì/no)" },
+  { chiave: "urgente", domanda: "🚨 È un caso urgente?" },
 ];
 
 function nuovaSessione(flow) {
@@ -166,41 +165,51 @@ app.post("/webhook", async (req, res) => {
       return;
     }
 
+    let comando = null;
     if (tipo === "text") {
-      const testo = message.text.body.trim().toLowerCase();
-
-      // Avvio flusso preventivo
-      if (testo.includes("preventivo") || testo === "1") {
-        stato.set(from, nuovaSessione("preventivo"));
-        await inviaMessaggio(
-          from,
-          `📋 *Richiesta Preventivo*\n\nTi faccio qualche domanda veloce, un passo alla volta. Scrivi *annulla* in qualsiasi momento per interrompere.\n\n${STEP_PREVENTIVO[0].domanda}`
-        );
-        return;
+      comando = message.text.body.trim().toLowerCase();
+    } else if (tipo === "interactive") {
+      const interattivo = message.interactive;
+      if (interattivo.type === "button_reply") {
+        comando = interattivo.button_reply.id;
+      } else if (interattivo.type === "list_reply") {
+        comando = interattivo.list_reply.id;
       }
+    }
 
-      // Avvio flusso guasto/assistenza
-      if (
-        testo.includes("guasto") ||
-        testo.includes("assistenza") ||
-        testo === "6"
-      ) {
-        stato.set(from, nuovaSessione("guasto"));
-        await inviaMessaggio(
-          from,
-          `🛠️ *Richiesta Guasto / Assistenza*\n\nTi faccio qualche domanda veloce, un passo alla volta. Scrivi *annulla* in qualsiasi momento per interrompere.\n\n${STEP_GUASTO[0].domanda}`
-        );
-        return;
-      }
-
-      const risposta = generaRisposta(testo);
-      await inviaMessaggio(from, risposta);
-    } else {
+    if (comando === null) {
       await inviaMessaggio(
         from,
-        "Ciao! Al momento gestisco solo messaggi di testo. Scrivi *aiuto* per vedere cosa posso fare."
+        "Ciao! Al momento gestisco solo testo e i pulsanti del menu. Scrivi *menu* per vedere le opzioni."
       );
+      return;
     }
+
+    // Avvio flusso preventivo
+    if (comando.includes("preventivo") || comando === "1") {
+      stato.set(from, nuovaSessione("preventivo"));
+      await inviaMessaggio(
+        from,
+        `📋 *Richiesta Preventivo*\n\nTi faccio qualche domanda veloce, un passo alla volta. Scrivi *annulla* in qualsiasi momento per interrompere.\n\n${STEP_PREVENTIVO[0].domanda}`
+      );
+      return;
+    }
+
+    // Avvio flusso guasto/assistenza
+    if (
+      comando.includes("guasto") ||
+      comando.includes("assistenza") ||
+      comando === "6"
+    ) {
+      stato.set(from, nuovaSessione("guasto"));
+      await inviaMessaggio(
+        from,
+        `🛠️ *Richiesta Guasto / Assistenza*\n\nTi faccio qualche domanda veloce, un passo alla volta. Scrivi *annulla* in qualsiasi momento per interrompere.\n\n${STEP_GUASTO[0].domanda}`
+      );
+      return;
+    }
+
+    await gestisciComando(from, comando);
   } catch (err) {
     console.error("❌ Errore gestione messaggio:", err.message);
   }
@@ -216,8 +225,13 @@ async function gestisciStepFlusso(from, message) {
     message.type === "text" ? message.text.body.trim() : null;
   const testoLower = testoGrezzo ? testoGrezzo.toLowerCase() : "";
 
-  // Comando annulla, disponibile in ogni momento
-  if (testoLower === "annulla") {
+  let idBottone = null;
+  if (message.type === "interactive" && message.interactive.type === "button_reply") {
+    idBottone = message.interactive.button_reply.id;
+  }
+
+  // Comando annulla, disponibile in ogni momento (testo o eventuale bottone)
+  if (testoLower === "annulla" || idBottone === "annulla") {
     stato.delete(from);
     await inviaMessaggio(
       from,
@@ -226,7 +240,7 @@ async function gestisciStepFlusso(from, message) {
     return;
   }
 
-  // Step foto (facoltativo)
+  // Step foto (facoltativo, con pulsante "Salta foto")
   if (stepCorrente.chiave === "foto") {
     if (message.type === "image") {
       try {
@@ -237,13 +251,33 @@ async function gestisciStepFlusso(from, message) {
         console.error("❌ Errore download foto:", err.message);
         sessione.dati.foto = null;
       }
-    } else if (testoLower === "salta" || testoLower === "no") {
+    } else if (idBottone === "foto_salta" || testoLower === "salta" || testoLower === "no") {
       sessione.dati.foto = null;
     } else {
-      await inviaMessaggio(
-        from,
-        "📷 Invia una foto oppure scrivi *salta* per continuare senza."
-      );
+      await inviaBottoni(from, "📷 Invia una foto oppure premi il pulsante per continuare senza.", [
+        { id: "foto_salta", title: "Salta foto" },
+      ]);
+      return;
+    }
+    avanzaStep(from, sessione, steps);
+    return;
+  }
+
+  // Step urgente (pulsanti Sì/No)
+  if (stepCorrente.chiave === "urgente") {
+    if (idBottone === "urgente_si") {
+      sessione.dati.urgente = "Sì";
+    } else if (idBottone === "urgente_no") {
+      sessione.dati.urgente = "No";
+    } else if (testoLower === "si" || testoLower === "sì") {
+      sessione.dati.urgente = "Sì";
+    } else if (testoLower === "no") {
+      sessione.dati.urgente = "No";
+    } else {
+      await inviaBottoni(from, "🚨 È un caso urgente?", [
+        { id: "urgente_si", title: "Sì" },
+        { id: "urgente_no", title: "No" },
+      ]);
       return;
     }
     avanzaStep(from, sessione, steps);
@@ -269,7 +303,20 @@ async function avanzaStep(from, sessione, steps) {
 
   if (sessione.stepIndex < steps.length) {
     stato.set(from, sessione);
-    await inviaMessaggio(from, steps[sessione.stepIndex].domanda);
+    const prossimo = steps[sessione.stepIndex];
+
+    if (prossimo.chiave === "foto") {
+      await inviaBottoni(from, prossimo.domanda, [
+        { id: "foto_salta", title: "Salta foto" },
+      ]);
+    } else if (prossimo.chiave === "urgente") {
+      await inviaBottoni(from, prossimo.domanda, [
+        { id: "urgente_si", title: "Sì" },
+        { id: "urgente_no", title: "No" },
+      ]);
+    } else {
+      await inviaMessaggio(from, prossimo.domanda);
+    }
   } else {
     // Flusso completato: invio email e chiusura
     await completaFlusso(from, sessione);
@@ -361,150 +408,226 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000); // controllo ogni ora
 
-// ─── LOGICA RISPOSTE MENU STATICO ──────────────────────────────────────────────
-function generaRisposta(testo) {
-  // Menu principale
+// ─── GESTIONE COMANDI MENU (testo o pulsante) ──────────────────────────────────
+async function gestisciComando(from, comando) {
+  // Menu principale → lista interattiva
   if (
-    testo === "ciao" ||
-    testo === "salve" ||
-    testo === "buongiorno" ||
-    testo === "buonasera" ||
-    testo === "aiuto" ||
-    testo === "menu" ||
-    testo === "help" ||
-    testo === "start"
+    comando === "ciao" ||
+    comando === "salve" ||
+    comando === "buongiorno" ||
+    comando === "buonasera" ||
+    comando === "aiuto" ||
+    comando === "menu" ||
+    comando === "help" ||
+    comando === "start"
   ) {
-    return (
-      `👋 Benvenuto in *De Pasquale Impianti*!\n\n` +
-      `Siamo specializzati in:\n` +
-      `⚡ Impianti Elettrici, Idrici, Riscaldamento\n` +
-      `❄️ Climatizzazione & Pompe di Calore\n` +
-      `☀️ Impianti Fotovoltaici\n` +
-      `🏠 Efficienza Energetica\n` +
-      `📹 TVCC - Automazioni\n` +
-      `🔥 Caldaie\n\n` +
-      `Scegli un'opzione:\n` +
-      `1️⃣ *preventivo* - Richiedi un preventivo\n` +
-      `2️⃣ *servizi* - I nostri servizi\n` +
-      `3️⃣ *conto termico* - Info incentivi\n` +
-      `4️⃣ *contatti* - Parlare con noi\n` +
-      `5️⃣ *urgente* - Richiesta intervento urgente\n` +
-      `6️⃣ *guasto* - Segnala un guasto / richiedi assistenza\n\n` +
-      `Rispondi con il numero o la parola chiave 👆`
-    );
+    await inviaListaMenu(from);
+    return;
   }
 
   // Servizi
-  if (testo.includes("servizi") || testo === "2") {
-    return (
+  if (comando.includes("servizi") || comando === "2") {
+    await inviaBottoni(
+      from,
       `🔧 *I Nostri Servizi*\n\n` +
-      `⚡ *Impianti Elettrici, Idrici, Riscaldamento*\n` +
-      `Civili, industriali, CCTV, allarmi, cancelli\n\n` +
-      `❄️ *Climatizzazione & Pompe di Calore*\n` +
-      `Pompe di calore, split, VMC, riscaldamento a pavimento\n\n` +
-      `☀️ *Impianti Fotovoltaici*\n` +
-      `Residenziale e industriale, con accumulo e colonnine EV\n\n` +
-      `🏠 *Efficienza Energetica*\n` +
-      `Diagnosi energetica, Conto Termico 3.0, Superbonus\n\n` +
-      `📹 *TVCC - Automazioni*\n` +
-      `Videosorveglianza, automazioni cancelli e accessi\n\n` +
-      `🔥 *Caldaie*\n` +
-      `Installazione, manutenzione e assistenza\n\n` +
-      `Per info scrivi *preventivo* oppure *contatti* 👇`
+        `⚡ *Impianti Elettrici, Idrici, Riscaldamento*\n` +
+        `Civili, industriali, CCTV, allarmi, cancelli\n\n` +
+        `❄️ *Climatizzazione & Pompe di Calore*\n` +
+        `Pompe di calore, split, VMC, riscaldamento a pavimento\n\n` +
+        `☀️ *Impianti Fotovoltaici*\n` +
+        `Residenziale e industriale, con accumulo e colonnine EV\n\n` +
+        `🏠 *Efficienza Energetica*\n` +
+        `Diagnosi energetica, Conto Termico 3.0, Superbonus\n\n` +
+        `📹 *TVCC - Automazioni*\n` +
+        `Videosorveglianza, automazioni cancelli e accessi\n\n` +
+        `🔥 *Caldaie*\n` +
+        `Installazione, manutenzione e assistenza`,
+      [
+        { id: "preventivo", title: "📋 Preventivo" },
+        { id: "menu", title: "🏠 Menu" },
+      ]
     );
+    return;
   }
 
   // Conto Termico
   if (
-    testo.includes("conto termico") ||
-    testo.includes("incentivi") ||
-    testo === "3"
+    comando.includes("conto_termico") ||
+    comando.includes("conto termico") ||
+    comando.includes("incentivi") ||
+    comando === "3"
   ) {
-    return (
+    await inviaBottoni(
+      from,
       `♻️ *Conto Termico 3.0*\n\n` +
-      `Il Conto Termico incentiva la sostituzione di vecchi generatori di calore con:\n\n` +
-      `✅ Pompe di calore aria/acqua\n` +
-      `✅ Caldaie a biomassa\n` +
-      `✅ Solare termico\n\n` +
-      `💰 *Incentivo fino al 65%* della spesa!\n` +
-      `📅 Erogazione in *2 rate annuali* tramite GSE\n\n` +
-      `Gestiamo tutta la pratica per te!\n` +
-      `Scrivi *preventivo* per iniziare 👆`
+        `Il Conto Termico incentiva la sostituzione di vecchi generatori di calore con:\n\n` +
+        `✅ Pompe di calore aria/acqua\n` +
+        `✅ Caldaie a biomassa\n` +
+        `✅ Solare termico\n\n` +
+        `💰 *Incentivo fino al 65%* della spesa!\n` +
+        `📅 Erogazione in *2 rate annuali* tramite GSE\n\n` +
+        `Gestiamo tutta la pratica per te!`,
+      [
+        { id: "preventivo", title: "📋 Preventivo" },
+        { id: "menu", title: "🏠 Menu" },
+      ]
     );
+    return;
   }
 
   // Contatti
-  if (testo.includes("contatti") || testo.includes("telefono") || testo === "4") {
-    return (
+  if (comando.includes("contatti") || comando.includes("telefono") || comando === "4") {
+    await inviaBottoni(
+      from,
       `📍 *De Pasquale Impianti Srl*\n\n` +
-      `📞 Telefono: *+39 0923 361191*\n` +
-      `📧 Email: info@depasqualeimpianti.com\n` +
-      `🌐 Web: www.depasqualeimpianti.com\n\n` +
-      `📍 Marsala (TP), Sicilia\n\n` +
-      `🕐 Orari ufficio:\n` +
-      `Lun-Ven: 9:00 - 18:30\n` +
-      `Sab-Dom: chiusi\n\n` +
-      `Per un preventivo rapido scrivi *preventivo* 👆`
+        `📞 Telefono: *+39 0923 361191*\n` +
+        `📧 Email: info@depasqualeimpianti.com\n` +
+        `🌐 Web: www.depasqualeimpianti.com\n\n` +
+        `📍 Marsala (TP), Sicilia\n\n` +
+        `🕐 Orari ufficio:\n` +
+        `Lun-Ven: 9:00 - 18:30\n` +
+        `Sab-Dom: chiusi`,
+      [
+        { id: "preventivo", title: "📋 Preventivo" },
+        { id: "menu", title: "🏠 Menu" },
+      ]
     );
+    return;
   }
 
   // Intervento urgente
-  if (testo.includes("urgente") || testo.includes("emergenza") || testo === "5") {
-    return (
+  if (comando.includes("urgente") || comando.includes("emergenza") || comando === "5") {
+    await inviaBottoni(
+      from,
       `🚨 *Richiesta Intervento Urgente*\n\n` +
-      `Per le emergenze ti invitiamo a visitare il nostro sito web:\n` +
-      `🌐 www.depasqualeimpianti.com\n\n` +
-      `Scrivici tramite la nostra *live chat* presente sul sito: un operatore ti risponderà il prima possibile! ⚡`
+        `Per le emergenze ti invitiamo a visitare il nostro sito web:\n` +
+        `🌐 www.depasqualeimpianti.com\n\n` +
+        `Scrivici tramite la nostra *live chat* presente sul sito: un operatore ti risponderà il prima possibile! ⚡`,
+      [{ id: "menu", title: "🏠 Menu" }]
     );
+    return;
   }
 
   // Fotovoltaico
   if (
-    testo.includes("fotovoltaic") ||
-    testo.includes("pannelli") ||
-    testo.includes("solare")
+    comando.includes("fotovoltaic") ||
+    comando.includes("pannelli") ||
+    comando.includes("solare")
   ) {
-    return (
+    await inviaBottoni(
+      from,
       `☀️ *Impianti Fotovoltaici*\n\n` +
-      `Realizziamo impianti fotovoltaici chiavi in mano:\n\n` +
-      `✅ Residenziali (3-20 kW)\n` +
-      `✅ Commerciali e industriali (20-3000 kW)\n` +
-      `✅ Con sistema di accumulo (batterie)\n` +
-      `✅ Con colonnine di ricarica EV\n\n` +
-      `📍 Operiamo in tutta la provincia di Trapani\n\n` +
-      `Scrivi *preventivo* per una consulenza gratuita! 🌞`
+        `Realizziamo impianti fotovoltaici chiavi in mano:\n\n` +
+        `✅ Residenziali (3-20 kW)\n` +
+        `✅ Commerciali e industriali (20-3000 kW)\n` +
+        `✅ Con sistema di accumulo (batterie)\n` +
+        `✅ Con colonnine di ricarica EV\n\n` +
+        `📍 Operiamo in tutta la provincia di Trapani`,
+      [
+        { id: "preventivo", title: "📋 Preventivo" },
+        { id: "menu", title: "🏠 Menu" },
+      ]
     );
+    return;
   }
 
   // Pompa di calore
   if (
-    testo.includes("pompa di calore") ||
-    testo.includes("climatizzaz") ||
-    testo.includes("condizionator")
+    comando.includes("pompa di calore") ||
+    comando.includes("climatizzaz") ||
+    comando.includes("condizionator")
   ) {
-    return (
+    await inviaBottoni(
+      from,
       `❄️ *Pompe di Calore & Climatizzazione*\n\n` +
-      `Installiamo e assistiamo:\n\n` +
-      `• Pompe di calore aria/acqua\n` +
-      `• Split e multi-split\n` +
-      `• Sistemi VRF\n` +
-      `• VMC (Ventilazione Meccanica Controllata)\n\n` +
-      `💰 Con il *Conto Termico 3.0* puoi ottenere fino al *65%* di incentivo!\n\n` +
-      `Scrivi *preventivo* per saperne di più 👆`
+        `Installiamo e assistiamo:\n\n` +
+        `• Pompe di calore aria/acqua\n` +
+        `• Split e multi-split\n` +
+        `• Sistemi VRF\n` +
+        `• VMC (Ventilazione Meccanica Controllata)\n\n` +
+        `💰 Con il *Conto Termico 3.0* puoi ottenere fino al *65%* di incentivo!`,
+      [
+        { id: "preventivo", title: "📋 Preventivo" },
+        { id: "menu", title: "🏠 Menu" },
+      ]
     );
+    return;
   }
 
   // Risposta default
-  return (
-    `❓ Non ho capito la tua richiesta.\n\n` +
-    `Scrivi *menu* per vedere tutte le opzioni disponibili, oppure chiamaci al:\n` +
-    `📞 *+39 0923 361191*\n\n` +
-    `Siamo qui per aiutarti! 😊`
+  await inviaBottoni(
+    from,
+    `❓ Non ho capito la tua richiesta.\n\nPuoi scegliere dal menu, oppure chiamaci al:\n📞 *+39 0923 361191*`,
+    [{ id: "menu", title: "🏠 Menu" }]
   );
 }
 
-// ─── INVIO MESSAGGIO VIA API WHATSAPP ─────────────────────────────────────────
+// ─── INVIO MESSAGGIO DI TESTO SEMPLICE ─────────────────────────────────────────
 async function inviaMessaggio(to, testo) {
+  await chiamaApiWhatsapp({
+    messaging_product: "whatsapp",
+    to: to,
+    type: "text",
+    text: { body: testo },
+  });
+}
+
+// ─── INVIO MESSAGGIO CON PULSANTI DI RISPOSTA RAPIDA (max 3) ──────────────────
+async function inviaBottoni(to, corpo, bottoni) {
+  await chiamaApiWhatsapp({
+    messaging_product: "whatsapp",
+    to: to,
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: corpo },
+      action: {
+        buttons: bottoni.map((b) => ({
+          type: "reply",
+          reply: { id: b.id, title: b.title },
+        })),
+      },
+    },
+  });
+}
+
+// ─── INVIO MENU PRINCIPALE COME LISTA INTERATTIVA ──────────────────────────────
+async function inviaListaMenu(to) {
+  await chiamaApiWhatsapp({
+    messaging_product: "whatsapp",
+    to: to,
+    type: "interactive",
+    interactive: {
+      type: "list",
+      header: { type: "text", text: "De Pasquale Impianti" },
+      body: {
+        text:
+          `👋 Benvenuto! Siamo specializzati in impianti elettrici, idrici, climatizzazione, fotovoltaico, TVCC e caldaie.\n\n` +
+          `Scegli un'opzione dal menu qui sotto 👇`,
+      },
+      footer: { text: "De Pasquale Impianti Srl" },
+      action: {
+        button: "Vedi opzioni",
+        sections: [
+          {
+            title: "Cosa ti serve?",
+            rows: [
+              { id: "preventivo", title: "📋 Preventivo", description: "Richiedi un preventivo" },
+              { id: "servizi", title: "🔧 Servizi", description: "Scopri i nostri servizi" },
+              { id: "conto_termico", title: "♻️ Conto Termico", description: "Incentivi fino al 65%" },
+              { id: "contatti", title: "📍 Contatti", description: "Parla direttamente con noi" },
+              { id: "urgente", title: "🚨 Urgente", description: "Richiesta intervento urgente" },
+              { id: "guasto", title: "🛠️ Guasto/Assistenza", description: "Segnala un guasto" },
+            ],
+          },
+        ],
+      },
+    },
+  });
+}
+
+// ─── CHIAMATA GENERICA ALL'API WHATSAPP ────────────────────────────────────────
+async function chiamaApiWhatsapp(payload) {
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
 
   try {
@@ -514,19 +637,14 @@ async function inviaMessaggio(to, testo) {
         Authorization: `Bearer ${WHATSAPP_TOKEN}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        to: to,
-        type: "text",
-        text: { body: testo },
-      }),
+      body: JSON.stringify(payload),
     });
 
     const data = await res.json();
     if (data.error) {
       console.error("❌ Errore invio:", data.error);
     } else {
-      console.log(`✅ Messaggio inviato a ${to}`);
+      console.log(`✅ Messaggio inviato a ${payload.to}`);
     }
   } catch (err) {
     console.error("❌ Errore fetch:", err.message);
@@ -538,7 +656,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "✅ DPI Chatbot attivo",
     numero: "+39 389 638 4755",
-    versione: "2.0.0",
+    versione: "3.0.0",
   });
 });
 
