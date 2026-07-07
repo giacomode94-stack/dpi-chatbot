@@ -420,6 +420,9 @@ async function gestisciStepFlusso(from, message) {
   if (message.type !== "text") {
     await inviaMessaggio(
       from,
+
+      const { registraTestInvio } = require('./test-invio');
+    registraTestInvio(app);
       "Per questa domanda mi serve una risposta testuale 🙂"
     );
     return;
