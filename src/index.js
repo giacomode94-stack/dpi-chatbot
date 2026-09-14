@@ -1,6 +1,8 @@
 const express = require("express");
 const app = express();
 app.use(express.json());
+const { registraTestInvio } = require('./test-invio');
+registraTestInvio(app);
 
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "dpi_chatbot_token";
@@ -420,9 +422,6 @@ async function gestisciStepFlusso(from, message) {
   if (message.type !== "text") {
     await inviaMessaggio(
       from,
-
-      const { registraTestInvio } = require('./test-invio');
-    registraTestInvio(app);
       "Per questa domanda mi serve una risposta testuale 🙂"
     );
     return;
