@@ -44,6 +44,39 @@ Dopo il deploy, l'URL di Render sarà tipo:
 
 ---
 
+## 📅 Invio automatico conferma appuntamento via WhatsApp
+
+Quando il gestionale invia l'email di conferma appuntamento, questa viene
+inoltrata dal server via SendGrid Inbound Parse all'endpoint `/inbound-email`,
+che estrae nome cliente, data, ora e numero di telefono dal testo e invia
+automaticamente il template WhatsApp `conferma_appuntamento_v2` al cliente.
+
+**Formato email atteso** (quello attuale del gestionale va bene così):
+```
+Buongiorno Sig. NOME COGNOME
+La presente è per confermare l'appuntamento 15/09/2026 alle ore 17:30, ...
+... che la contatteranno al n° +393519072997 .
+```
+
+### Configurazione SendGrid Inbound Parse (una tantum)
+1. Scegli un sottodominio dedicato, es. `notifiche.depasqualeimpianti.com`.
+2. Nel pannello DNS del dominio, aggiungi un record **MX** per quel sottodominio
+   che punta a `mx.sendgrid.net` (priorità 10).
+3. Su SendGrid → **Settings → Inbound Parse → Add Host & URL**:
+   - **Domain**: `notifiche.depasqualeimpianti.com`
+   - **Destination URL**: `https://dpi-chatbot.onrender.com/inbound-email?secret=IL_TUO_INBOUND_SECRET`
+4. Imposta il gestionale in modo che invii (anche in CC/inoltro automatico)
+   l'email di conferma appuntamento a un indirizzo su quel sottodominio,
+   es. `appuntamenti@notifiche.depasqualeimpianti.com`.
+5. Aggiungi su Render la variabile `INBOUND_SECRET` con lo stesso valore
+   usato nell'URL al punto 3.
+
+Se l'estrazione automatica fallisce (email in un formato inatteso), il
+sistema NON invia nulla su WhatsApp e ti manda invece una email di avviso
+con il testo originale, così puoi contattare il cliente manualmente.
+
+---
+
 ## 💬 Comandi del Bot
 
 | Parola chiave | Risposta |
