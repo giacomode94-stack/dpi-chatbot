@@ -1,4 +1,5 @@
 const express = require("express");
+const multer = require("multer");
 const app = express();
 app.use(express.json());
 const { registraTestInvio } = require('./test-invio');
@@ -12,6 +13,15 @@ const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
 const EMAIL_MITTENTE = process.env.EMAIL_MITTENTE || "info@depasqualeimpianti.com";
 const EMAIL_DESTINATARIO = process.env.EMAIL_DESTINATARIO || "info@depasqualeimpianti.com";
+
+// Token segreto opzionale per proteggere il webhook di inbound email.
+// Se impostato, l'URL configurato su SendGrid Inbound Parse deve includere
+// ?secret=IL_TUO_TOKEN, altrimenti la richiesta viene rifiutata.
+const INBOUND_SECRET = process.env.INBOUND_SECRET;
+
+// Nome del template WhatsApp usato per la conferma appuntamento.
+// Parametri del body nell'ordine: Nome cliente, Data, Ora.
+const TEMPLATE_CONFERMA_APPUNTAMENTO = process.env.TEMPLATE_CONFERMA_APPUNTAMENTO || "conferma_appuntamento_v2";
 
 // ─── CONFIGURAZIONE EMAIL (SendGrid via API HTTPS) ─────────────────────────────
 // Usiamo l'API HTTPS di SendGrid invece di SMTP: Render blocca le porte SMTP
@@ -219,6 +229,148 @@ app.post("/webhook", async (req, res) => {
   // sessione contemporaneamente e "saltino" dei passaggi del flusso.
   accodaElaborazione(from, () => elaboraMessaggio(from, message));
 });
+
+// ─── WEBHOOK INBOUND EMAIL (SendGrid Inbound Parse) ────────────────────────
+// Riceve via email le conferme appuntamento generate dal gestionale e invia
+// automaticamente al cliente la notifica WhatsApp corrispondente, usando il
+// template "conferma_appuntamento_v2".
+//
+// SendGrid Inbound Parse invia il payload come multipart/form-data (non
+// JSON), quindi usiamo multer per leggerne i campi testuali (upload.none()
+// = nessun file, solo i campi "to", "from", "subject", "text", "html", ...).
+const uploadParser = multer();
+
+app.post("/inbound-email", uploadParser.none(), async (req, res) => {
+  // Rispondiamo subito 200 in ogni caso: SendGrid ritenta in caso di errore
+  // HTTP, e un retry qui produrrebbe invii WhatsApp duplicati al cliente.
+  res.status(200).send("ok");
+
+  try {
+    if (INBOUND_SECRET && req.query.secret !== INBOUND_SECRET) {
+      console.error("❌ Inbound email: secret mancante o errato, richiesta ignorata.");
+      return;
+    }
+
+    const oggetto = req.body.subject || "(senza oggetto)";
+    const testoEmail = req.body.text || "";
+
+    console.log(`📧 Email in arrivo: "${oggetto}"`);
+
+    const appuntamento = estraiDatiAppuntamento(testoEmail);
+
+    if (!appuntamento) {
+      console.error("⚠️ Inbound email: impossibile estrarre i dati dell'appuntamento (nome/data/ora/telefono).");
+      await inviaEmail({
+        oggetto: `⚠️ Notifica WhatsApp NON inviata — verifica manuale richiesta`,
+        html:
+          `<p>Non sono riuscito a estrarre automaticamente nome, data, ora o telefono da questa email:</p>` +
+          `<p><strong>Oggetto:</strong> ${oggetto}</p>` +
+          `<pre>${(testoEmail || "(corpo vuoto)").replace(/</g, "&lt;")}</pre>` +
+          `<p>Invia manualmente la conferma al cliente.</p>`,
+      });
+      return;
+    }
+
+    await inviaConfermaAppuntamento(appuntamento);
+  } catch (err) {
+    console.error("❌ Errore elaborazione inbound email:", err.message);
+  }
+});
+
+// Estrae nome cliente, data, ora e numero di telefono dal corpo dell'email
+// di conferma appuntamento generata dal gestionale. Pensata per il formato:
+//
+//   Buongiorno Sig. NOME COGNOME
+//   La presente è per confermare l'appuntamento 15/09/2026 alle ore 17:30, ...
+//   ... che la contatteranno al n° +393519072997 .
+//
+// Tollera varianti di titolo (Sig./Sig.ra/Gent.mo/Gent.ma/Dott./Spett.le) e
+// numeri scritti con o senza "+", spazi o prefisso 0.
+function estraiDatiAppuntamento(testo) {
+  if (!testo) return null;
+
+  const primaRiga = (testo.split(/\r?\n/)[0] || "").trim();
+  const matchNome = primaRiga.match(/Buongiorno\s+(.+)/i);
+  let nome = matchNome ? matchNome[1].trim() : null;
+  if (nome) {
+    nome = nome
+      .replace(/^(Gent\.?\s?(mo|ma)\.?\s+)?(Sig\.?\s?(ra)?\.?|Dott\.?(ssa)?\.?|Spett\.?le\.?)\s*/i, "")
+      .replace(/[.,]\s*$/, "")
+      .trim();
+  }
+
+  const matchData = testo.match(/(\d{2}\/\d{2}\/\d{4})/);
+  const data = matchData ? matchData[1] : null;
+
+  const matchOra = testo.match(/ore\s+(\d{1,2}[:.]\d{2})/i);
+  const ora = matchOra ? matchOra[1].replace(".", ":") : null;
+
+  const matchTelefono = testo.match(/n[°º]?\s*(\+?\d[\d\s]{7,13}\d)/);
+  const telefonoGrezzo = matchTelefono ? matchTelefono[1] : null;
+  const telefono = telefonoGrezzo ? telefonoGrezzo.replace(/[^\d]/g, "") : null;
+
+  if (!nome || !data || !ora || !telefono) return null;
+
+  const numero = telefono.startsWith("39") ? telefono : `39${telefono.replace(/^0/, "")}`;
+
+  return { nome, data, ora, numero };
+}
+
+// Invia la notifica WhatsApp di conferma appuntamento tramite template Meta.
+async function inviaConfermaAppuntamento({ nome, data, ora, numero }) {
+  const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: numero,
+    type: "template",
+    template: {
+      name: TEMPLATE_CONFERMA_APPUNTAMENTO,
+      language: { code: "it" },
+      components: [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: nome },
+            { type: "text", text: data },
+            { type: "text", text: ora },
+          ],
+        },
+      ],
+    },
+  };
+
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${WHATSAPP_TOKEN}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const result = await response.json();
+
+    if (result.error) {
+      console.error(`❌ Errore invio conferma appuntamento a ${numero}:`, result.error);
+      await inviaEmail({
+        oggetto: `⚠️ Notifica WhatsApp NON inviata a ${nome} (${numero})`,
+        html: `<p>Errore API WhatsApp:</p><pre>${JSON.stringify(result.error, null, 2)}</pre>`,
+      });
+    } else {
+      console.log(`✅ Conferma appuntamento inviata a ${nome} (${numero}) — ${data} ${ora}`);
+    }
+
+    return result;
+  } catch (err) {
+    console.error(`❌ Errore rete invio conferma appuntamento a ${numero}:`, err.message);
+    await inviaEmail({
+      oggetto: `⚠️ Notifica WhatsApp NON inviata a ${nome} (${numero})`,
+      html: `<p>Errore di rete durante l'invio:</p><pre>${err.message}</pre>`,
+    });
+  }
+}
 
 async function elaboraMessaggio(from, message) {
   const tipo = message.type;
