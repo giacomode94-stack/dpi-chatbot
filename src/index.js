@@ -1,5 +1,7 @@
 const express = require("express");
 const multer = require("multer");
+const { ImapFlow } = require("imapflow");
+const { simpleParser } = require("mailparser");
 const app = express();
 app.use(express.json());
 const { registraTestInvio } = require('./test-invio');
@@ -22,6 +24,31 @@ const INBOUND_SECRET = process.env.INBOUND_SECRET;
 // Nome del template WhatsApp usato per la conferma appuntamento.
 // Parametri del body nell'ordine: Nome cliente, Data, Ora.
 const TEMPLATE_CONFERMA_APPUNTAMENTO = process.env.TEMPLATE_CONFERMA_APPUNTAMENTO || "conferma_appuntamento_v2";
+
+// ─── LETTURA CASELLA APPUNTAMENTI VIA IMAP (in alternativa/attesa del webhook) ──
+// La casella appuntamenti@depasqualeimpianti.com (Migadu) è dedicata SOLO alle
+// notifiche di conferma appuntamento inviate dal gestionale. Il bot la controlla
+// periodicamente via IMAP, invece di ricevere un webhook, per non dipendere
+// dalla configurazione DNS/SendGrid Inbound Parse (che richiede accesso al
+// pannello DNS del dominio, non sempre disponibile).
+const IMAP_HOST = process.env.IMAP_HOST || "imap.migadu.com";
+const IMAP_PORT = Number(process.env.IMAP_PORT || 993);
+const IMAP_USER = process.env.IMAP_USER; // es. appuntamenti@depasqualeimpianti.com
+const IMAP_PASSWORD = process.env.IMAP_PASSWORD;
+const IMAP_POLL_MS = Number(process.env.IMAP_POLL_MS || 3 * 60 * 1000); // ogni 3 minuti
+// Le email del gestionale hanno sempre questo oggetto: usarlo come primo filtro
+// (oltre all'estrazione nome/data/ora/telefono dal testo) evita di processare
+// per errore email non pertinenti finite in questa casella.
+const IMAP_SUBJECT_FILTER = process.env.IMAP_SUBJECT_FILTER || "notifica di inserimento richiesta";
+// Flag IMAP personalizzato usato per marcare le email già elaborate dal bot,
+// senza toccare lo stato letto/non letto visibile in webmail.
+const IMAP_PROCESSED_FLAG = "DPIBotProcessed";
+// Data di avvio del processo: non elaboriamo email precedenti a questo momento,
+// per evitare che alla primissima attivazione (o dopo un riavvio) il bot mandi
+// conferme WhatsApp per vecchie email già presenti nella casella. Le email già
+// elaborate restano comunque marcate per sempre (il flag è sul server IMAP),
+// quindi un riavvio successivo non le rielabora.
+const IMAP_AVVIO = new Date();
 
 // ─── CONFIGURAZIONE EMAIL (SendGrid via API HTTPS) ─────────────────────────────
 // Usiamo l'API HTTPS di SendGrid invece di SMTP: Render blocca le porte SMTP
@@ -369,6 +396,100 @@ async function inviaConfermaAppuntamento({ nome, data, ora, numero }) {
       oggetto: `⚠️ Notifica WhatsApp NON inviata a ${nome} (${numero})`,
       html: `<p>Errore di rete durante l'invio:</p><pre>${err.message}</pre>`,
     });
+  }
+}
+
+// ─── CONTROLLO PERIODICO CASELLA APPUNTAMENTI (IMAP) ───────────────────────────
+// Si collega alla casella dedicata, cerca le email con l'oggetto del gestionale
+// non ancora elaborate (senza il flag IMAP_PROCESSED_FLAG), estrae i dati con
+// la stessa logica del webhook /inbound-email e invia la conferma WhatsApp.
+// Ogni email controllata viene marcata con un flag IMAP personalizzato, per non
+// rielaborarla ai controlli successivi e senza alterare lo stato letto/non letto
+// che vedi tu in webmail.
+let controlloImapInCorso = false;
+
+async function controllaEmailAppuntamenti() {
+  if (!IMAP_USER || !IMAP_PASSWORD) return; // funzione non configurata, si salta
+  if (controlloImapInCorso) return; // evita sovrapposizioni se un ciclo impiega troppo
+  controlloImapInCorso = true;
+
+  const client = new ImapFlow({
+    host: IMAP_HOST,
+    port: IMAP_PORT,
+    secure: true,
+    auth: { user: IMAP_USER, pass: IMAP_PASSWORD },
+    logger: false,
+  });
+
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock("INBOX");
+    try {
+      // Cerchiamo solo le email col soggetto del gestionale: IMAP filtra lato
+      // server, così scarichiamo/analizziamo solo ciò che ci interessa.
+      const uids = await client.search(
+        { subject: IMAP_SUBJECT_FILTER, since: IMAP_AVVIO },
+        { uid: true }
+      );
+
+      for (const uid of uids || []) {
+        const msg = await client.fetchOne(
+          uid,
+          { uid: true, flags: true, source: true },
+          { uid: true }
+        );
+        if (!msg) continue;
+
+        const flags = msg.flags ? Array.from(msg.flags) : [];
+        if (flags.includes(IMAP_PROCESSED_FLAG)) continue; // già elaborata
+
+        try {
+          const parsed = await simpleParser(msg.source);
+          const testoEmail = parsed.text || "";
+          const oggetto = parsed.subject || "(senza oggetto)";
+
+          console.log(`📧 [IMAP] Email in arrivo: "${oggetto}"`);
+
+          const appuntamento = estraiDatiAppuntamento(testoEmail);
+
+          if (!appuntamento) {
+            console.error(
+              "⚠️ [IMAP] Impossibile estrarre i dati dell'appuntamento (nome/data/ora/telefono)."
+            );
+            await inviaEmail({
+              oggetto: `⚠️ Notifica WhatsApp NON inviata — verifica manuale richiesta`,
+              html:
+                `<p>Non sono riuscito a estrarre automaticamente nome, data, ora o telefono da questa email:</p>` +
+                `<p><strong>Oggetto:</strong> ${oggetto}</p>` +
+                `<pre>${(testoEmail || "(corpo vuoto)").replace(/</g, "&lt;")}</pre>` +
+                `<p>Invia manualmente la conferma al cliente.</p>`,
+            });
+          } else {
+            await inviaConfermaAppuntamento(appuntamento);
+          }
+        } catch (errSingola) {
+          console.error("❌ [IMAP] Errore elaborazione singola email:", errSingola.message);
+        }
+
+        // Marchiamo come elaborata in ogni caso (successo, dato mancante o
+        // errore), per non ritentare all'infinito la stessa email.
+        try {
+          await client.messageFlagsAdd({ uid: uid.toString() }, [IMAP_PROCESSED_FLAG], { uid: true });
+        } catch (errFlag) {
+          console.error("❌ [IMAP] Errore impostazione flag elaborato:", errFlag.message);
+        }
+      }
+    } finally {
+      lock.release();
+    }
+    await client.logout();
+  } catch (err) {
+    console.error("❌ [IMAP] Errore controllo casella appuntamenti:", err.message);
+    try {
+      await client.logout();
+    } catch (_) {}
+  } finally {
+    controlloImapInCorso = false;
   }
 }
 
@@ -989,3 +1110,14 @@ app.get("/", (req, res) => {
 app.listen(PORT, () => {
   console.log(`🚀 DPI Chatbot in ascolto sulla porta ${PORT}`);
 });
+
+// ─── AVVIO CONTROLLO PERIODICO CASELLA APPUNTAMENTI ────────────────────────────
+if (IMAP_USER && IMAP_PASSWORD) {
+  console.log(
+    `📬 Controllo periodico casella ${IMAP_USER} attivo (ogni ${Math.round(IMAP_POLL_MS / 1000)}s)`
+  );
+  controllaEmailAppuntamenti(); // primo controllo subito all'avvio
+  setInterval(controllaEmailAppuntamenti, IMAP_POLL_MS);
+} else {
+  console.log("📬 Controllo IMAP casella appuntamenti disattivato (IMAP_USER/IMAP_PASSWORD non impostate).");
+}
