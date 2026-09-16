@@ -12,7 +12,14 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "dpi_chatbot_token";
 const WHATSAPP_TOKEN = process.env.WHATSAPP_TOKEN;
 const PHONE_NUMBER_ID = process.env.PHONE_NUMBER_ID;
 
-const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY;
+// ─── CONFIGURAZIONE EMAIL (Brevo via API HTTPS) ─────────────────────────────────
+// Usiamo l'API HTTPS di Brevo (ex Sendinblue, piano gratuito: 300 email/giorno
+// per sempre, nessuna carta richiesta) al posto di SendGrid. Come con SendGrid,
+// usiamo l'API HTTPS e non l'SMTP: le porte SMTP (25/465/587) sono bloccate sui
+// servizi web gratuiti di Render, mentre le chiamate HTTPS non lo sono.
+// La casella appuntamenti@ resta usata SOLO in ricezione (polling IMAP) per le
+// conferme appuntamento del gestionale — le due caselle non si mescolano.
+const BREVO_API_KEY = process.env.BREVO_API_KEY;
 const EMAIL_MITTENTE = process.env.EMAIL_MITTENTE || "info@depasqualeimpianti.com";
 const EMAIL_DESTINATARIO = process.env.EMAIL_DESTINATARIO || "info@depasqualeimpianti.com";
 
@@ -50,32 +57,27 @@ const IMAP_PROCESSED_FLAG = "DPIBotProcessed";
 // quindi un riavvio successivo non le rielabora.
 const IMAP_AVVIO = new Date();
 
-// ─── CONFIGURAZIONE EMAIL (SendGrid via API HTTPS) ─────────────────────────────
-// Usiamo l'API HTTPS di SendGrid invece di SMTP: Render blocca le porte SMTP
-// (25/465/587) sui servizi gratuiti, ma le chiamate HTTPS non sono soggette
-// a questa restrizione.
 async function inviaEmail({ oggetto, html, attachments }) {
   try {
     const body = {
-      personalizations: [{ to: [{ email: EMAIL_DESTINATARIO }] }],
-      from: { email: EMAIL_MITTENTE, name: "DPI Chatbot" },
+      sender: { email: EMAIL_MITTENTE, name: "DPI Chatbot" },
+      to: [{ email: EMAIL_DESTINATARIO }],
       subject: oggetto,
-      content: [{ type: "text/html", value: html }],
+      htmlContent: html,
     };
 
     if (attachments && attachments.length > 0) {
-      body.attachments = attachments.map((a) => ({
+      body.attachment = attachments.map((a) => ({
         content: a.content.toString("base64"),
-        filename: a.filename,
-        type: a.contentType || "application/octet-stream",
-        disposition: "attachment",
+        name: a.filename,
       }));
     }
 
-    const res = await fetch("https://api.sendgrid.com/v3/mail/send", {
+    const res = await fetch("https://api.brevo.com/v3/smtp/email", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${SENDGRID_API_KEY}`,
+        "api-key": BREVO_API_KEY,
+        Accept: "application/json",
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
