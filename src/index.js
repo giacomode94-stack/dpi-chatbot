@@ -32,6 +32,11 @@ const INBOUND_SECRET = process.env.INBOUND_SECRET;
 // Parametri del body nell'ordine: Nome cliente, Data, Ora.
 const TEMPLATE_CONFERMA_APPUNTAMENTO = process.env.TEMPLATE_CONFERMA_APPUNTAMENTO || "conferma_appuntamento_v2";
 
+// Nome del template WhatsApp usato quando il gestionale invia un "Cambio
+// pianificazione" (appuntamento spostato/pianificato). Stessi parametri:
+// Nome cliente, Data, Ora.
+const TEMPLATE_CAMBIO_APPUNTAMENTO = process.env.TEMPLATE_CAMBIO_APPUNTAMENTO || "cambio_appuntamento_v1";
+
 // ─── LETTURA CASELLA APPUNTAMENTI VIA IMAP (in alternativa/attesa del webhook) ──
 // La casella appuntamenti@depasqualeimpianti.com (Migadu) è dedicata SOLO alle
 // notifiche di conferma appuntamento inviate dal gestionale. Il bot la controlla
@@ -47,6 +52,10 @@ const IMAP_POLL_MS = Number(process.env.IMAP_POLL_MS || 3 * 60 * 1000); // ogni 
 // (oltre all'estrazione nome/data/ora/telefono dal testo) evita di processare
 // per errore email non pertinenti finite in questa casella.
 const IMAP_SUBJECT_FILTER = process.env.IMAP_SUBJECT_FILTER || "notifica di inserimento richiesta";
+// Oggetto delle email di cambio pianificazione del gestionale. Nota: il
+// gestionale scrive "pianficazione" (senza la "i"), quindi cerchiamo la parte
+// comune "cambio pian" che copre sia la versione con refuso che quella corretta.
+const IMAP_SUBJECT_CAMBIO = process.env.IMAP_SUBJECT_CAMBIO || "cambio pian";
 // Flag IMAP personalizzato usato per marcare le email già elaborate dal bot,
 // senza toccare lo stato letto/non letto visibile in webmail.
 const IMAP_PROCESSED_FLAG = "DPIBotProcessed";
@@ -346,7 +355,25 @@ function estraiDatiAppuntamento(testo) {
 }
 
 // Invia la notifica WhatsApp di conferma appuntamento tramite template Meta.
-async function inviaConfermaAppuntamento({ nome, data, ora, numero }) {
+async function inviaConfermaAppuntamento({ nome, data, ora, numero }, tipo = "conferma") {
+  const nomeTemplate = tipo === "cambio" ? TEMPLATE_CAMBIO_APPUNTAMENTO : TEMPLATE_CONFERMA_APPUNTAMENTO;
+  const etichetta = tipo === "cambio" ? "Cambio appuntamento" : "Conferma appuntamento";
+
+  // WhatsApp funziona solo su numeri di cellulare (in Italia iniziano con 3,
+  // quindi 393...). Se il gestionale riporta un numero fisso (es. 0923...)
+  // non tentiamo l'invio e avvisiamo via email.
+  if (!/^393\d{8,10}$/.test(numero)) {
+    console.error(`⚠️ ${etichetta}: numero ${numero} non è un cellulare, WhatsApp non inviato.`);
+    await inviaEmail({
+      oggetto: `⚠️ Notifica WhatsApp NON inviata a ${nome} (${numero}) — numero non cellulare`,
+      html:
+        `<p>${etichetta} del <strong>${data} alle ore ${ora}</strong> per <strong>${nome}</strong>.</p>` +
+        `<p>Il numero <strong>+${numero}</strong> non sembra un cellulare, quindi non posso inviare il WhatsApp.</p>` +
+        `<p>Contatta il cliente manualmente.</p>`,
+    });
+    return null;
+  }
+
   const url = `https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`;
 
   const payload = {
@@ -354,7 +381,7 @@ async function inviaConfermaAppuntamento({ nome, data, ora, numero }) {
     to: numero,
     type: "template",
     template: {
-      name: TEMPLATE_CONFERMA_APPUNTAMENTO,
+      name: nomeTemplate,
       language: { code: "it" },
       components: [
         {
@@ -382,13 +409,13 @@ async function inviaConfermaAppuntamento({ nome, data, ora, numero }) {
     const result = await response.json();
 
     if (result.error) {
-      console.error(`❌ Errore invio conferma appuntamento a ${numero}:`, result.error);
+      console.error(`❌ Errore invio ${etichetta.toLowerCase()} a ${numero}:`, result.error);
       await inviaEmail({
         oggetto: `⚠️ Notifica WhatsApp NON inviata a ${nome} (${numero})`,
         html: `<p>Errore API WhatsApp:</p><pre>${JSON.stringify(result.error, null, 2)}</pre>`,
       });
     } else {
-      console.log(`✅ Conferma appuntamento inviata a ${nome} (${numero}) — ${data} ${ora}`);
+      console.log(`✅ ${etichetta} inviato a ${nome} (${numero}) — ${data} ${ora}`);
     }
 
     return result;
@@ -430,14 +457,17 @@ async function controllaEmailAppuntamenti() {
       // Cerchiamo solo le email col soggetto del gestionale: IMAP filtra lato
       // server, così scarichiamo/analizziamo solo ciò che ci interessa.
       const uids = await client.search(
-        { subject: IMAP_SUBJECT_FILTER, since: IMAP_AVVIO },
+        {
+          since: IMAP_AVVIO,
+          or: [{ subject: IMAP_SUBJECT_FILTER }, { subject: IMAP_SUBJECT_CAMBIO }],
+        },
         { uid: true }
       );
 
       for (const uid of uids || []) {
         const msg = await client.fetchOne(
           uid,
-          { uid: true, flags: true, source: true },
+          { uid: true, flags: true, source: true, internalDate: true },
           { uid: true }
         );
         if (!msg) continue;
@@ -445,12 +475,24 @@ async function controllaEmailAppuntamenti() {
         const flags = msg.flags ? Array.from(msg.flags) : [];
         if (flags.includes(IMAP_PROCESSED_FLAG)) continue; // già elaborata
 
+        // Il filtro IMAP "since" lavora solo per giorno (non per ora): senza
+        // questo controllo, dopo un riavvio il bot rielaborerebbe tutte le
+        // email arrivate oggi prima dell'avvio, mandando WhatsApp doppi o
+        // vecchi ai clienti. Le marchiamo come elaborate e le saltiamo.
+        if (msg.internalDate && new Date(msg.internalDate) < IMAP_AVVIO) {
+          try {
+            await client.messageFlagsAdd({ uid: uid.toString() }, [IMAP_PROCESSED_FLAG], { uid: true });
+          } catch (_) {}
+          continue;
+        }
+
         try {
           const parsed = await simpleParser(msg.source);
           const testoEmail = parsed.text || "";
           const oggetto = parsed.subject || "(senza oggetto)";
 
-          console.log(`📧 [IMAP] Email in arrivo: "${oggetto}"`);
+          const tipo = /cambio\s+pian/i.test(oggetto) ? "cambio" : "conferma";
+          console.log(`📧 [IMAP] Email in arrivo (${tipo}): "${oggetto}"`);
 
           const appuntamento = estraiDatiAppuntamento(testoEmail);
 
@@ -467,7 +509,7 @@ async function controllaEmailAppuntamenti() {
                 `<p>Invia manualmente la conferma al cliente.</p>`,
             });
           } else {
-            await inviaConfermaAppuntamento(appuntamento);
+            await inviaConfermaAppuntamento(appuntamento, tipo);
           }
         } catch (errSingola) {
           console.error("❌ [IMAP] Errore elaborazione singola email:", errSingola.message);
