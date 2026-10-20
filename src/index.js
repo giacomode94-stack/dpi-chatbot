@@ -37,6 +37,25 @@ const TEMPLATE_CONFERMA_APPUNTAMENTO = process.env.TEMPLATE_CONFERMA_APPUNTAMENT
 // Nome cliente, Data, Ora.
 const TEMPLATE_CAMBIO_APPUNTAMENTO = process.env.TEMPLATE_CAMBIO_APPUNTAMENTO || "cambio_appuntamento_v1";
 
+// ─── PROMEMORIA IL GIORNO PRIMA DELL'APPUNTAMENTO ───────────────────────────────
+// Template WhatsApp del promemoria (parametri: Nome, Data, Ora) con due pulsanti
+// di risposta rapida: [0] "Confermo", [1] "Devo annullare/spostare".
+const TEMPLATE_PROMEMORIA = process.env.TEMPLATE_PROMEMORIA || "promemoria_appuntamento_v1";
+// Orario (ora italiana, HH:MM) a partire dal quale si inviano i promemoria per
+// gli appuntamenti del giorno dopo.
+const PROMEMORIA_ORARIO = process.env.PROMEMORIA_ORARIO || "10:30";
+// Oltre questo orario non si inviano più promemoria (es. se il bot è rimasto
+// spento tutta la mattina, non vogliamo mandarli a tarda sera).
+const PROMEMORIA_ORARIO_LIMITE = process.env.PROMEMORIA_ORARIO_LIMITE || "19:00";
+// Quanti giorni indietro guardare nella casella per trovare gli appuntamenti.
+const PROMEMORIA_GIORNI_STORICO = Number(process.env.PROMEMORIA_GIORNI_STORICO || 60);
+// Flag IMAP che marca l'email dell'appuntamento per cui il promemoria è già
+// partito: così un riavvio del bot non manda promemoria doppi.
+const IMAP_PROMEMORIA_FLAG = "DPIPromemoriaInviato";
+// Oggetto delle email inviate dall'ufficio a appuntamenti@ per bloccare il
+// promemoria di un appuntamento annullato (nel testo: il numero del cliente).
+const IMAP_SUBJECT_ANNULLA = process.env.IMAP_SUBJECT_ANNULLA || "annulla";
+
 // ─── LETTURA CASELLA APPUNTAMENTI VIA IMAP (in alternativa/attesa del webhook) ──
 // La casella appuntamenti@depasqualeimpianti.com (Migadu) è dedicata SOLO alle
 // notifiche di conferma appuntamento inviate dal gestionale. Il bot la controlla
@@ -349,9 +368,20 @@ function estraiDatiAppuntamento(testo) {
 
   if (!nome || !data || !ora || !telefono) return null;
 
-  const numero = telefono.startsWith("39") ? telefono : `39${telefono.replace(/^0/, "")}`;
+  const numero = normalizzaNumero(telefono);
 
   return { nome, data, ora, numero };
+}
+
+// Porta un numero italiano nel formato usato da WhatsApp (39XXXXXXXXXX).
+// Gestisce +39/0039, cellulari scritti senza prefisso (3XX XXXXXXX, anche
+// quelli che iniziano per 39) e fissi con lo 0 iniziale.
+function normalizzaNumero(grezzo) {
+  let n = String(grezzo || "").replace(/[^\d]/g, "");
+  if (n.startsWith("00")) n = n.slice(2);
+  if (n.length === 10 && n.startsWith("3")) return `39${n}`; // cellulare senza prefisso
+  if (n.startsWith("39")) return n;
+  return `39${n.replace(/^0/, "")}`;
 }
 
 // Invia la notifica WhatsApp di conferma appuntamento tramite template Meta.
@@ -537,10 +567,309 @@ async function controllaEmailAppuntamenti() {
   }
 }
 
+// ─── PROMEMORIA WHATSAPP IL GIORNO PRIMA DELL'APPUNTAMENTO ─────────────────────
+// Ogni giorno, dopo PROMEMORIA_ORARIO (ora italiana), il bot rilegge dalla
+// casella appuntamenti@ le email del gestionale degli ultimi giorni e manda il
+// promemoria ai clienti che hanno l'appuntamento DOMANI. Non serve un database:
+// la casella è già l'archivio di tutti gli appuntamenti.
+//
+// Regole:
+//  - un "Cambio pianificazione" più recente per lo stesso numero sostituisce
+//    gli appuntamenti precedenti di quel cliente;
+//  - un'email con oggetto "ANNULLA" (mandata dall'ufficio a appuntamenti@, con
+//    il numero del cliente nel testo) blocca il promemoria degli appuntamenti
+//    di quel numero ricevuti PRIMA dell'email di annullamento;
+//  - se l'appuntamento è stato inserito oggi, il cliente ha appena ricevuto la
+//    conferma e il promemoria non viene mandato;
+//  - l'email dell'appuntamento viene marcata con IMAP_PROMEMORIA_FLAG, quindi
+//    ogni promemoria parte una volta sola anche dopo un riavvio.
+
+const FUSO_ORARIO = "Europe/Rome";
+
+// Restituisce { data: "GG/MM/AAAA", minuti: minuti dalla mezzanotte } in ora italiana.
+function oraItaliana(d = new Date()) {
+  const parti = Object.fromEntries(
+    new Intl.DateTimeFormat("it-IT", {
+      timeZone: FUSO_ORARIO,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(d)
+      .map((p) => [p.type, p.value])
+  );
+  return {
+    data: `${parti.day}/${parti.month}/${parti.year}`,
+    minuti: Number(parti.hour) * 60 + Number(parti.minute),
+  };
+}
+
+function dataDiDomani() {
+  const oggi = oraItaliana().data.split("/").map(Number); // [gg, mm, aaaa]
+  const domani = new Date(Date.UTC(oggi[2], oggi[1] - 1, oggi[0] + 1, 12));
+  const gg = String(domani.getUTCDate()).padStart(2, "0");
+  const mm = String(domani.getUTCMonth() + 1).padStart(2, "0");
+  return `${gg}/${mm}/${domani.getUTCFullYear()}`;
+}
+
+function orarioInMinuti(hhmm) {
+  const [h, m] = String(hhmm).split(":").map(Number);
+  return h * 60 + (m || 0);
+}
+
+// Estrae i numeri di telefono scritti nel testo di un'email di annullamento.
+function estraiNumeriAnnullamento(testo) {
+  const trovati = String(testo || "").match(/\+?\d[\d\s.\-\/]{7,16}\d/g) || [];
+  return trovati
+    .map(normalizzaNumero)
+    .filter((n) => /^39\d{8,11}$/.test(n));
+}
+
+async function inviaPromemoriaAppuntamento({ nome, data, ora, numero }) {
+  if (!/^393\d{8,10}$/.test(numero)) {
+    console.log(`⏭️ Promemoria: numero ${numero} non è un cellulare, saltato.`);
+    return false;
+  }
+
+  const payloadPulsante = (indice, azione) => ({
+    type: "button",
+    sub_type: "quick_reply",
+    index: String(indice),
+    parameters: [{ type: "payload", payload: `PROMEMORIA_${azione}|${data}|${ora}|${String(nome).slice(0, 60)}` }],
+  });
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: numero,
+    type: "template",
+    template: {
+      name: TEMPLATE_PROMEMORIA,
+      language: { code: "it" },
+      components: [
+        {
+          type: "body",
+          parameters: [
+            { type: "text", text: nome },
+            { type: "text", text: data },
+            { type: "text", text: ora },
+          ],
+        },
+        payloadPulsante(0, "OK"),
+        payloadPulsante(1, "KO"),
+      ],
+    },
+  };
+
+  try {
+    const res = await fetch(`https://graph.facebook.com/v19.0/${PHONE_NUMBER_ID}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${WHATSAPP_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const result = await res.json();
+    if (result.error) {
+      console.error(`❌ Errore invio promemoria a ${numero}:`, result.error);
+      await inviaEmail({
+        oggetto: `⚠️ Promemoria WhatsApp NON inviato a ${nome} (${numero})`,
+        html:
+          `<p>Appuntamento del <strong>${data} alle ore ${ora}</strong>.</p>` +
+          `<p>Errore API WhatsApp:</p><pre>${JSON.stringify(result.error, null, 2)}</pre>`,
+      });
+      return false;
+    }
+    console.log(`✅ Promemoria inviato a ${nome} (${numero}) — ${data} ${ora}`);
+    return true;
+  } catch (err) {
+    console.error(`❌ Errore rete invio promemoria a ${numero}:`, err.message);
+    return false;
+  }
+}
+
+let promemoriaInCorso = false;
+let ultimoGiornoPromemoria = null; // "GG/MM/AAAA" dell'ultimo giro completato
+
+async function controllaPromemoria() {
+  if (!IMAP_USER || !IMAP_PASSWORD) return;
+  const adesso = oraItaliana();
+  if (adesso.minuti < orarioInMinuti(PROMEMORIA_ORARIO)) return;
+  if (adesso.minuti >= orarioInMinuti(PROMEMORIA_ORARIO_LIMITE)) return;
+  if (ultimoGiornoPromemoria === adesso.data) return; // già fatto oggi
+  if (promemoriaInCorso) return;
+  promemoriaInCorso = true;
+
+  const domani = dataDiDomani();
+  console.log(`⏰ Promemoria: cerco gli appuntamenti di domani ${domani}...`);
+
+  const client = new ImapFlow({
+    host: IMAP_HOST,
+    port: IMAP_PORT,
+    secure: true,
+    auth: { user: IMAP_USER, pass: IMAP_PASSWORD },
+    logger: false,
+  });
+
+  try {
+    await client.connect();
+    const lock = await client.getMailboxLock("INBOX");
+    try {
+      const dal = new Date(Date.now() - PROMEMORIA_GIORNI_STORICO * 24 * 60 * 60 * 1000);
+      const uids = await client.search(
+        {
+          since: dal,
+          or: [
+            { subject: IMAP_SUBJECT_FILTER },
+            { subject: IMAP_SUBJECT_CAMBIO },
+            { subject: IMAP_SUBJECT_ANNULLA },
+          ],
+        },
+        { uid: true }
+      );
+
+      const appuntamenti = []; // { uid, quando, tipo, giaInviato, nome, data, ora, numero }
+      const annullamenti = []; // { quando, numero }
+
+      for (const uid of uids || []) {
+        const msg = await client.fetchOne(
+          uid,
+          { uid: true, flags: true, source: true, internalDate: true },
+          { uid: true }
+        );
+        if (!msg) continue;
+        try {
+          const parsed = await simpleParser(msg.source);
+          const oggetto = parsed.subject || "";
+          const testo = parsed.text || "";
+          const quando = new Date(msg.internalDate || parsed.date || Date.now());
+
+          if (/cambio\s+pian/i.test(oggetto) || new RegExp(IMAP_SUBJECT_FILTER, "i").test(oggetto)) {
+            const dati = estraiDatiAppuntamento(testo);
+            if (!dati) continue;
+            const flags = msg.flags ? Array.from(msg.flags) : [];
+            appuntamenti.push({
+              ...dati,
+              uid,
+              quando,
+              tipo: /cambio\s+pian/i.test(oggetto) ? "cambio" : "conferma",
+              giaInviato: flags.includes(IMAP_PROMEMORIA_FLAG),
+            });
+          } else if (new RegExp(`\\b${IMAP_SUBJECT_ANNULLA}`, "i").test(oggetto)) {
+            for (const numero of estraiNumeriAnnullamento(`${oggetto}\n${testo}`)) {
+              annullamenti.push({ quando, numero });
+            }
+          }
+        } catch (errSingola) {
+          console.error("❌ [Promemoria] Errore lettura email:", errSingola.message);
+        }
+      }
+
+      const giaInviatiOggi = new Set(); // numero|data|ora, evita doppioni nello stesso giro
+
+      for (const app of appuntamenti) {
+        if (app.data !== domani) continue;
+        if (app.giaInviato) continue;
+
+        const chiave = `${app.numero}|${app.data}|${app.ora}`;
+        if (giaInviatiOggi.has(chiave)) continue;
+
+        // Inserito oggi: il cliente ha appena ricevuto la conferma.
+        if (oraItaliana(app.quando).data === adesso.data) {
+          console.log(`⏭️ Promemoria: ${app.nome} ha ricevuto la conferma oggi, salto.`);
+          continue;
+        }
+
+        // Sostituito da un cambio pianificazione più recente?
+        const sostituito = appuntamenti.some(
+          (altro) =>
+            altro.numero === app.numero &&
+            altro.tipo === "cambio" &&
+            altro.quando > app.quando &&
+            (altro.data !== app.data || altro.ora !== app.ora)
+        );
+        if (sostituito) {
+          console.log(`⏭️ Promemoria: appuntamento di ${app.nome} spostato in seguito, salto.`);
+          continue;
+        }
+
+        // Annullato dall'ufficio?
+        const annullato = annullamenti.some((a) => a.numero === app.numero && a.quando > app.quando);
+        if (annullato) {
+          console.log(`⏭️ Promemoria: appuntamento di ${app.nome} annullato, salto.`);
+          continue;
+        }
+
+        const inviato = await inviaPromemoriaAppuntamento(app);
+        if (inviato) {
+          giaInviatiOggi.add(chiave);
+          // Marchiamo tutte le email di questo appuntamento (stesso numero,
+          // data e ora), così nessuna fa ripartire il promemoria.
+          for (const stesso of appuntamenti) {
+            if (`${stesso.numero}|${stesso.data}|${stesso.ora}` !== chiave) continue;
+            try {
+              await client.messageFlagsAdd({ uid: stesso.uid.toString() }, [IMAP_PROMEMORIA_FLAG], { uid: true });
+              stesso.giaInviato = true;
+            } catch (errFlag) {
+              console.error("❌ [Promemoria] Errore impostazione flag:", errFlag.message);
+            }
+          }
+        }
+      }
+
+      ultimoGiornoPromemoria = adesso.data;
+      console.log(`⏰ Promemoria del ${adesso.data} completati (${giaInviatiOggi.size} inviati).`);
+    } finally {
+      lock.release();
+    }
+    await client.logout();
+  } catch (err) {
+    console.error("❌ [Promemoria] Errore controllo casella:", err.message);
+    try {
+      await client.logout();
+    } catch (_) {}
+  } finally {
+    promemoriaInCorso = false;
+  }
+}
+
+// Risposta del cliente ai pulsanti del promemoria (payload "PROMEMORIA_OK|data|ora|nome"
+// o "PROMEMORIA_KO|data|ora|nome", impostato al momento dell'invio).
+async function gestisciRispostaPromemoria(from, payload) {
+  const [azione, data, ora, nomeProfilo] = String(payload).split("|");
+  const quando = data && ora ? ` del ${data} alle ore ${ora}` : "";
+
+  if (azione === "PROMEMORIA_OK") {
+    await inviaMessaggio(from, `✅ Grazie per la conferma! La aspettiamo per l'appuntamento${quando}.`);
+    console.log(`✅ ${from} ha confermato l'appuntamento${quando}`);
+    return;
+  }
+
+  await inviaMessaggio(
+    from,
+    `Ricevuto, grazie per averci avvisato. 📞 La ricontatteremo al più presto per riprogrammare l'appuntamento${quando}.`
+  );
+  await inviaEmail({
+    oggetto: `❌ Cliente non disponibile per l'appuntamento${quando} — ${nomeProfilo || from}`,
+    html:
+      `<p>Il cliente <strong>${nomeProfilo || "(nome non disponibile)"}</strong> ` +
+      `(<strong>+${from}</strong>) ha risposto al promemoria WhatsApp che <strong>deve annullare o spostare</strong> ` +
+      `l'appuntamento${quando}.</p>` +
+      `<p>Ricontattalo e aggiorna il gestionale.</p>`,
+  });
+}
+
 async function elaboraMessaggio(from, message) {
   const tipo = message.type;
 
   try {
+    // Risposta ai pulsanti del promemoria (template con risposte rapide):
+    // va gestita prima di tutto, anche se il cliente è dentro un flusso.
+    if (tipo === "button" && /^PROMEMORIA_/.test(message.button?.payload || "")) {
+      await gestisciRispostaPromemoria(from, message.button.payload);
+      return;
+    }
+
     // Se il cliente è dentro un flusso guidato, gestiamo lo step
     if (stato.has(from)) {
       await gestisciStepFlusso(from, message);
@@ -1147,7 +1476,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "✅ DPI Chatbot attivo",
     numero: "+39 389 638 4755",
-    versione: "3.0.0",
+    versione: "3.1.0",
   });
 });
 
@@ -1162,6 +1491,14 @@ if (IMAP_USER && IMAP_PASSWORD) {
   );
   controllaEmailAppuntamenti(); // primo controllo subito all'avvio
   setInterval(controllaEmailAppuntamenti, IMAP_POLL_MS);
+
+  // Promemoria del giorno prima: controlliamo ogni 5 minuti se è arrivato
+  // l'orario (PROMEMORIA_ORARIO, ora italiana) e se il giro di oggi è già fatto.
+  console.log(
+    `⏰ Promemoria appuntamenti attivi: ogni giorno dalle ${PROMEMORIA_ORARIO} (ora italiana), template ${TEMPLATE_PROMEMORIA}`
+  );
+  setTimeout(controllaPromemoria, 30 * 1000);
+  setInterval(controllaPromemoria, 5 * 60 * 1000);
 } else {
   console.log("📬 Controllo IMAP casella appuntamenti disattivato (IMAP_USER/IMAP_PASSWORD non impostate).");
 }
