@@ -94,23 +94,14 @@ function dataOraRoma(data = new Date()) {
 
 const DOMANDA_URGENZA_FUORI_ORARIO =
   '🌙 I nostri uffici sono chiusi in questo momento.\n\n' +
-  'La tua richiesta è *urgente* e richiede un intervento *entro 4 ore*?\n\n' +
-  '⚠️ Gli interventi urgenti fuori orario prevedono un costo aggiuntivo composto da:\n' +
+  '⚠️ Per un intervento *entro 4 ore* fuori orario è previsto un costo aggiuntivo composto da:\n' +
   '• *diritto di chiamata notturno/festivo*\n' +
-  '• *costo chilometrico* per lo spostamento del tecnico';
-
-// Titoli pulsanti: max 20 caratteri
-const BOTTONI_URGENZA_FUORI_ORARIO = [
-  { id: 'urgente_si', title: 'Sì, accetto' },
-  { id: 'urgente_no', title: 'No, attendo apertura' },
-];
+  '• *costo chilometrico* per lo spostamento del tecnico\n\n' +
+  'Accetti e vuoi procedere con la richiesta?';
 
 const TESTO_URGENZA_SI =
   '✅ Richiesta urgente inoltrata. Un nostro tecnico ti ricontatterà al più presto ' +
   "per confermare l'intervento e il supplemento.";
-
-const TESTO_URGENZA_NO =
-  '👍 Perfetto, la tua richiesta è registrata. Ti ricontatteremo alla riapertura degli uffici.';
 
 // ---------- Notifica a Giacomo (template) ----------
 
@@ -168,9 +159,7 @@ module.exports = {
   dataOraRoma,
   festivita,
   DOMANDA_URGENZA_FUORI_ORARIO,
-  BOTTONI_URGENZA_FUORI_ORARIO,
   TESTO_URGENZA_SI,
-  TESTO_URGENZA_NO,
   payloadNotificaUrgenza,
   notificaUrgenza,
 };

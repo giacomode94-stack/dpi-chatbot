@@ -229,8 +229,14 @@ function nuovaSessione(flow) {
   };
 }
 
+// Flusso "urgenza" (intervento entro 4 ore dal menu Urgente): stesse domande
+// del guasto, senza "È urgente?" perché il cliente l'ha già scelto.
+const STEP_URGENZA = STEP_GUASTO.filter((s) => s.chiave !== "urgente");
+
 function getSteps(flow) {
-  return flow === "preventivo" ? STEP_PREVENTIVO : STEP_GUASTO;
+  if (flow === "preventivo") return STEP_PREVENTIVO;
+  if (flow === "urgenza") return STEP_URGENZA;
+  return STEP_GUASTO;
 }
 
 // ─── WEBHOOK VERIFICA (Meta lo chiama per verificare l'endpoint) ───────────────
@@ -1055,7 +1061,7 @@ async function gestisciStepFlusso(from, message) {
     } else if (testoLower === "no") {
       sessione.dati.urgente = "No";
     } else {
-      await inviaDomandaUrgenza(from, sessione);
+      await inviaDomandaUrgenza(from);
       return;
     }
     avanzaStep(from, sessione, steps);
@@ -1089,10 +1095,7 @@ async function avanzaStep(from, sessione, steps, prefisso) {
         { id: "foto_salta", title: "Salta foto" },
       ]);
     } else if (prossimo.chiave === "urgente") {
-      // Fuori orario la domanda avvisa del supplemento; lo stato viene fissato
-      // ora, così vale la risposta del cliente anche se arriva dopo le 8:00.
-      sessione.fuoriOrario = urgenze.isFuoriOrario();
-      await inviaDomandaUrgenza(from, sessione, prefisso);
+      await inviaDomandaUrgenza(from, prefisso);
     } else if (prossimo.chiave === "tipo_impianto") {
       await inviaListaTipoImpianto(from, testoDomanda);
     } else {
@@ -1105,21 +1108,24 @@ async function avanzaStep(from, sessione, steps, prefisso) {
   }
 }
 
-// Domanda "urgente": in orario Sì/No, fuori orario avviso supplemento + 4 ore
-async function inviaDomandaUrgenza(from, sessione, prefisso) {
-  const conPrefisso = (t) => (prefisso ? `${prefisso}\n\n${t}` : t);
-  if (sessione.fuoriOrario) {
-    await inviaBottoni(
-      from,
-      conPrefisso(urgenze.DOMANDA_URGENZA_FUORI_ORARIO),
-      urgenze.BOTTONI_URGENZA_FUORI_ORARIO
-    );
-  } else {
-    await inviaBottoni(from, conPrefisso("🚨 È un caso urgente?"), [
-      { id: "urgente_si", title: "Sì" },
-      { id: "urgente_no", title: "No" },
-    ]);
-  }
+// Domanda "urgente" del flusso guasto (semplice Sì/No)
+async function inviaDomandaUrgenza(from, prefisso) {
+  const testo = "🚨 È un caso urgente?";
+  await inviaBottoni(from, prefisso ? `${prefisso}\n\n${testo}` : testo, [
+    { id: "urgente_si", title: "Sì" },
+    { id: "urgente_no", title: "No" },
+  ]);
+}
+
+// Avvia la raccolta dati per l'intervento urgente entro 4 ore
+async function avviaFlussoUrgenza(from, fuoriOrario) {
+  const sessione = nuovaSessione("urgenza");
+  sessione.fuoriOrario = fuoriOrario;
+  stato.set(from, sessione);
+  await inviaMessaggio(
+    from,
+    `🚨 *Intervento urgente entro 4 ore*\n\nTi faccio qualche domanda veloce, un passo alla volta. Scrivi *annulla* in qualsiasi momento per interrompere.\n\n${STEP_URGENZA[0].domanda}`
+  );
 }
 
 function estensioneDaMime(mimeType) {
@@ -1137,12 +1143,19 @@ async function completaFlusso(from, sessione) {
   const isPreventivo = sessione.flow === "preventivo";
   const d = sessione.dati;
 
+  const isUrgenza = sessione.flow === "urgenza";
   const oggetto = isPreventivo
     ? "Richiesta da chatbot DPI – Preventivo"
+    : isUrgenza
+    ? "Richiesta da chatbot DPI – INTERVENTO URGENTE (entro 4 ore)"
     : "Richiesta da chatbot DPI – Guasto/Assistenza";
 
   let html = `<h2>${
-    isPreventivo ? "Nuova richiesta di preventivo" : "Nuova richiesta di assistenza/guasto"
+    isPreventivo
+      ? "Nuova richiesta di preventivo"
+      : isUrgenza
+      ? "🚨 Richiesta di INTERVENTO URGENTE entro 4 ore"
+      : "Nuova richiesta di assistenza/guasto"
   }</h2>`;
   html += `<p><strong>Numero WhatsApp cliente:</strong> ${from}</p>`;
   html += `<p><strong>Nome e cognome:</strong> ${d.nome || "-"}</p>`;
@@ -1159,11 +1172,11 @@ async function completaFlusso(from, sessione) {
     html += `<p><strong>Comune/indirizzo:</strong> ${d.comune || "-"}</p>`;
     html += `<p><strong>Telefono:</strong> ${d.telefono || "-"}</p>`;
     html += `<p><strong>Email cliente:</strong> ${d.email || "-"}</p>`;
-    html += `<p><strong>Urgente:</strong> ${d.urgente || "-"}</p>`;
-    if (sessione.fuoriOrario) {
-      html += `<p><strong>Ricevuta fuori orario:</strong> Sì${
-        d.urgente === "Sì" ? " – il cliente ha accettato il supplemento urgenza (entro 4 ore)" : ""
-      }</p>`;
+    if (isUrgenza) {
+      html += `<p><strong>Intervento richiesto:</strong> entro 4 ore</p>`;
+      html += `<p><strong>Ricevuta fuori orario:</strong> ${sessione.fuoriOrario ? "Sì – il cliente ha accettato diritto di chiamata notturno/festivo e costo chilometrico" : "No"}</p>`;
+    } else {
+      html += `<p><strong>Urgente:</strong> ${d.urgente || "-"}</p>`;
     }
     const numFoto = Array.isArray(d.foto) ? d.foto.length : 0;
     html += `<p><strong>Foto/video allegati:</strong> ${numFoto > 0 ? `${numFoto} (vedi allegati)` : "No"}</p>`;
@@ -1180,8 +1193,7 @@ async function completaFlusso(from, sessione) {
     });
   }
 
-  const urgenzaFuoriOrario =
-    !isPreventivo && sessione.fuoriOrario && d.urgente === "Sì";
+  const urgenzaFuoriOrario = isUrgenza && sessione.fuoriOrario;
 
   // Prima la notifica urgente (è la cosa più importante), poi l'email completa
   if (urgenzaFuoriOrario) {
@@ -1197,16 +1209,22 @@ async function completaFlusso(from, sessione) {
   }
 
   await inviaEmail({
-    oggetto: urgenzaFuoriOrario ? `🚨 URGENTE FUORI ORARIO – ${oggetto}` : oggetto,
+    oggetto: urgenzaFuoriOrario ? `🚨 FUORI ORARIO – ${oggetto}` : oggetto,
     html,
     attachments,
   });
 
   let risposta;
-  if (!isPreventivo && sessione.fuoriOrario) {
-    risposta = d.urgente === "Sì" ? urgenze.TESTO_URGENZA_SI : urgenze.TESTO_URGENZA_NO;
+  if (isUrgenza) {
+    risposta = sessione.fuoriOrario
+      ? urgenze.TESTO_URGENZA_SI
+      : "✅ Richiesta di intervento urgente ricevuta. Un nostro tecnico ti ricontatterà al più presto per organizzare l'intervento.";
   } else {
     risposta = `✅ Grazie ${d.nome || ""}! Abbiamo ricevuto la tua richiesta.\n\nUn nostro tecnico ti ricontatterà al più presto.`;
+    if (!isPreventivo && d.urgente === "Sì" && urgenze.isFuoriOrario()) {
+      risposta +=
+        `\n\n🌙 I nostri uffici ora sono chiusi. Se ti serve un intervento *entro 4 ore*, scrivi *urgente*.`;
+    }
   }
   await inviaMessaggio(from, `${risposta}\n\nPer altre richieste scrivi *menu* 👋`);
 }
@@ -1336,15 +1354,52 @@ async function gestisciComando(from, comando) {
     return;
   }
 
-  // Intervento urgente
-  if (comando.includes("urgente") || comando.includes("emergenza") || comando === "5") {
+  // ── Urgente: scelta tra operatore (live chat sul sito) e intervento entro 4 ore
+  if (comando === "emerg_operatore") {
     await inviaBottoni(
       from,
-      `🚨 *Richiesta Intervento Urgente*\n\n` +
-        `Per le emergenze ti invitiamo a visitare il nostro sito web:\n` +
+      `💬 *Parla con un operatore*\n\n` +
+        `Visita il nostro sito web:\n` +
         `🌐 www.depasqualeimpianti.com\n\n` +
         `Scrivici tramite la nostra *live chat* presente sul sito: un operatore ti risponderà il prima possibile! ⚡`,
       [{ id: "menu", title: "🏠 Menu" }]
+    );
+    return;
+  }
+
+  if (comando === "emerg_4ore") {
+    if (urgenze.isFuoriOrario()) {
+      // Fuori orario: prima l'avviso del supplemento, poi i dati
+      await inviaBottoni(
+        from,
+        urgenze.DOMANDA_URGENZA_FUORI_ORARIO,
+        [
+          { id: "emerg_accetto", title: "Sì, accetto" },
+          { id: "menu", title: "🏠 Menu" },
+        ]
+      );
+    } else {
+      await avviaFlussoUrgenza(from, false);
+    }
+    return;
+  }
+
+  if (comando === "emerg_accetto") {
+    await avviaFlussoUrgenza(from, true);
+    return;
+  }
+
+  if (comando.includes("urgente") || comando.includes("emergenza") || comando === "5") {
+    await inviaBottoni(
+      from,
+      `🚨 *Richiesta Intervento Urgente*\n\nCome possiamo aiutarti?\n\n` +
+        `💬 *Operatore*: parla con noi tramite la live chat del nostro sito\n` +
+        `🛠️ *Entro 4 ore*: richiedi un intervento urgente entro 4 ore`,
+      [
+        { id: "emerg_operatore", title: "💬 Operatore" },
+        { id: "emerg_4ore", title: "🛠️ Entro 4 ore" },
+        { id: "menu", title: "🏠 Menu" },
+      ]
     );
     return;
   }
@@ -1521,7 +1576,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "✅ DPI Chatbot attivo",
     numero: "+39 389 638 4755",
-    versione: "3.2.0",
+    versione: "3.3.0",
   });
 });
 
