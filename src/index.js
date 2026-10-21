@@ -2,6 +2,7 @@ const express = require("express");
 const multer = require("multer");
 const { ImapFlow } = require("imapflow");
 const { simpleParser } = require("mailparser");
+const urgenze = require("./urgenze");
 const app = express();
 app.use(express.json());
 const { registraTestInvio } = require('./test-invio');
@@ -1054,10 +1055,7 @@ async function gestisciStepFlusso(from, message) {
     } else if (testoLower === "no") {
       sessione.dati.urgente = "No";
     } else {
-      await inviaBottoni(from, "🚨 È un caso urgente?", [
-        { id: "urgente_si", title: "Sì" },
-        { id: "urgente_no", title: "No" },
-      ]);
+      await inviaDomandaUrgenza(from, sessione);
       return;
     }
     avanzaStep(from, sessione, steps);
@@ -1091,10 +1089,10 @@ async function avanzaStep(from, sessione, steps, prefisso) {
         { id: "foto_salta", title: "Salta foto" },
       ]);
     } else if (prossimo.chiave === "urgente") {
-      await inviaBottoni(from, testoDomanda, [
-        { id: "urgente_si", title: "Sì" },
-        { id: "urgente_no", title: "No" },
-      ]);
+      // Fuori orario la domanda avvisa del supplemento; lo stato viene fissato
+      // ora, così vale la risposta del cliente anche se arriva dopo le 8:00.
+      sessione.fuoriOrario = urgenze.isFuoriOrario();
+      await inviaDomandaUrgenza(from, sessione, prefisso);
     } else if (prossimo.chiave === "tipo_impianto") {
       await inviaListaTipoImpianto(from, testoDomanda);
     } else {
@@ -1104,6 +1102,23 @@ async function avanzaStep(from, sessione, steps, prefisso) {
     // Flusso completato: invio email e chiusura
     await completaFlusso(from, sessione);
     stato.delete(from);
+  }
+}
+
+// Domanda "urgente": in orario Sì/No, fuori orario avviso supplemento + 4 ore
+async function inviaDomandaUrgenza(from, sessione, prefisso) {
+  const conPrefisso = (t) => (prefisso ? `${prefisso}\n\n${t}` : t);
+  if (sessione.fuoriOrario) {
+    await inviaBottoni(
+      from,
+      conPrefisso(urgenze.DOMANDA_URGENZA_FUORI_ORARIO),
+      urgenze.BOTTONI_URGENZA_FUORI_ORARIO
+    );
+  } else {
+    await inviaBottoni(from, conPrefisso("🚨 È un caso urgente?"), [
+      { id: "urgente_si", title: "Sì" },
+      { id: "urgente_no", title: "No" },
+    ]);
   }
 }
 
@@ -1145,6 +1160,11 @@ async function completaFlusso(from, sessione) {
     html += `<p><strong>Telefono:</strong> ${d.telefono || "-"}</p>`;
     html += `<p><strong>Email cliente:</strong> ${d.email || "-"}</p>`;
     html += `<p><strong>Urgente:</strong> ${d.urgente || "-"}</p>`;
+    if (sessione.fuoriOrario) {
+      html += `<p><strong>Ricevuta fuori orario:</strong> Sì${
+        d.urgente === "Sì" ? " – il cliente ha accettato il supplemento urgenza (entro 4 ore)" : ""
+      }</p>`;
+    }
     const numFoto = Array.isArray(d.foto) ? d.foto.length : 0;
     html += `<p><strong>Foto/video allegati:</strong> ${numFoto > 0 ? `${numFoto} (vedi allegati)` : "No"}</p>`;
   }
@@ -1160,12 +1180,35 @@ async function completaFlusso(from, sessione) {
     });
   }
 
-  await inviaEmail({ oggetto, html, attachments });
+  const urgenzaFuoriOrario =
+    !isPreventivo && sessione.fuoriOrario && d.urgente === "Sì";
 
-  await inviaMessaggio(
-    from,
-    `✅ Grazie ${d.nome || ""}! Abbiamo ricevuto la tua richiesta.\n\nUn nostro tecnico ti ricontatterà al più presto.\n\nPer altre richieste scrivi *menu* 👋`
-  );
+  // Prima la notifica urgente (è la cosa più importante), poi l'email completa
+  if (urgenzaFuoriOrario) {
+    await urgenze.notificaUrgenza(
+      {
+        nome: d.nome,
+        telefono: d.telefono || from,
+        indirizzo: d.comune,
+        problema: [d.tipo_impianto, d.descrizione].filter(Boolean).join(" – "),
+      },
+      { chiamaApiWhatsapp, inviaEmail }
+    );
+  }
+
+  await inviaEmail({
+    oggetto: urgenzaFuoriOrario ? `🚨 URGENTE FUORI ORARIO – ${oggetto}` : oggetto,
+    html,
+    attachments,
+  });
+
+  let risposta;
+  if (!isPreventivo && sessione.fuoriOrario) {
+    risposta = d.urgente === "Sì" ? urgenze.TESTO_URGENZA_SI : urgenze.TESTO_URGENZA_NO;
+  } else {
+    risposta = `✅ Grazie ${d.nome || ""}! Abbiamo ricevuto la tua richiesta.\n\nUn nostro tecnico ti ricontatterà al più presto.`;
+  }
+  await inviaMessaggio(from, `${risposta}\n\nPer altre richieste scrivi *menu* 👋`);
 }
 
 // ─── SCARICA MEDIA DA WHATSAPP (per le foto) ───────────────────────────────────
@@ -1463,11 +1506,13 @@ async function chiamaApiWhatsapp(payload) {
     const data = await res.json();
     if (data.error) {
       console.error("❌ Errore invio:", data.error);
-    } else {
-      console.log(`✅ Messaggio inviato a ${payload.to}`);
+      return false;
     }
+    console.log(`✅ Messaggio inviato a ${payload.to}`);
+    return true;
   } catch (err) {
     console.error("❌ Errore fetch:", err.message);
+    return false;
   }
 }
 
@@ -1476,7 +1521,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "✅ DPI Chatbot attivo",
     numero: "+39 389 638 4755",
-    versione: "3.1.0",
+    versione: "3.2.0",
   });
 });
 
