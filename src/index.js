@@ -7,6 +7,10 @@ const app = express();
 app.use(express.json());
 const { registraTestInvio } = require('./test-invio');
 registraTestInvio(app);
+const { registraPaginaChat } = require("./chat-page");
+registraPaginaChat(app);
+// Pagina con la sola live chat Yeastar/Linkus (vedi chat-page.js)
+const CHAT_URL = process.env.CHAT_URL || "https://dpi-chatbot.onrender.com/chat";
 
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "dpi_chatbot_token";
@@ -1356,14 +1360,31 @@ async function gestisciComando(from, comando) {
 
   // ── Urgente: scelta tra operatore (live chat sul sito) e intervento entro 4 ore
   if (comando === "emerg_operatore") {
-    await inviaBottoni(
-      from,
-      `💬 *Parla con un operatore*\n\n` +
-        `Visita il nostro sito web:\n` +
-        `🌐 www.depasqualeimpianti.com\n\n` +
-        `Scrivici tramite la nostra *live chat* presente sul sito: un operatore ti risponderà il prima possibile! ⚡`,
-      [{ id: "menu", title: "🏠 Menu" }]
-    );
+    const ok = await chiamaApiWhatsapp({
+      messaging_product: "whatsapp",
+      to: from,
+      type: "interactive",
+      interactive: {
+        type: "cta_url",
+        body: {
+          text:
+            `💬 *Parla con un operatore*\n\n` +
+            `Tocca il pulsante qui sotto per aprire la nostra *live chat*: un operatore ti risponderà il prima possibile! ⚡`,
+        },
+        footer: { text: "Per tornare al menu scrivi menu" },
+        action: {
+          name: "cta_url",
+          parameters: { display_text: "💬 Apri chat", url: CHAT_URL },
+        },
+      },
+    });
+    if (!ok) {
+      // Riserva: link in chiaro se il pulsante non viene accettato
+      await inviaMessaggio(
+        from,
+        `💬 *Parla con un operatore*\n\nApri la nostra live chat da qui:\n${CHAT_URL}\n\nPer tornare al menu scrivi *menu*`
+      );
+    }
     return;
   }
 
@@ -1393,7 +1414,7 @@ async function gestisciComando(from, comando) {
     await inviaBottoni(
       from,
       `🚨 *Richiesta Intervento Urgente*\n\nCome possiamo aiutarti?\n\n` +
-        `💬 *Operatore*: parla con noi tramite la live chat del nostro sito\n` +
+        `💬 *Operatore*: chatta subito con un nostro operatore\n` +
         `🛠️ *Entro 4 ore*: richiedi un intervento urgente entro 4 ore`,
       [
         { id: "emerg_operatore", title: "💬 Operatore" },
@@ -1576,7 +1597,7 @@ app.get("/", (req, res) => {
   res.json({
     status: "✅ DPI Chatbot attivo",
     numero: "+39 389 638 4755",
-    versione: "3.3.0",
+    versione: "3.4.0",
   });
 });
 
