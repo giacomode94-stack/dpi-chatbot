@@ -9,8 +9,11 @@ const { registraTestInvio } = require('./test-invio');
 registraTestInvio(app);
 const { registraPaginaChat } = require("./chat-page");
 registraPaginaChat(app);
-// Pagina con la sola live chat Yeastar/Linkus (vedi chat-page.js)
-const CHAT_URL = process.env.CHAT_URL || "https://dpi-chatbot.onrender.com/chat";
+// Link aperto dal pulsante "Apri chat" (live chat Yeastar/Linkus).
+// Per usare il link diretto generato dal centralino Yeastar basta impostare
+// CHAT_URL su Render. Nota: il widget Yeastar si carica solo sul dominio
+// configurato nel centralino, per questo la pagina /chat del bot resta vuota.
+const CHAT_URL = process.env.CHAT_URL || "https://www.depasqualeimpianti.com";
 
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "dpi_chatbot_token";
@@ -1369,7 +1372,10 @@ async function gestisciComando(from, comando) {
         body: {
           text:
             `💬 *Parla con un operatore*\n\n` +
-            `Tocca il pulsante qui sotto per aprire la nostra *live chat*: un operatore ti risponderà il prima possibile! ⚡`,
+            `Tocca il pulsante qui sotto per aprire la nostra *live chat*: un operatore ti risponderà il prima possibile! ⚡` +
+            (CHAT_URL.includes("depasqualeimpianti.com")
+              ? `\n\nSi aprirà il nostro sito: tocca il *pulsante verde* in basso a destra per iniziare la chat.`
+              : ""),
         },
         footer: { text: "Per tornare al menu scrivi menu" },
         action: {
